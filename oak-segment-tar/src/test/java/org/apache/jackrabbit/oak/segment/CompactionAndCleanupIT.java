@@ -28,8 +28,8 @@ import static org.apache.jackrabbit.oak.api.Type.STRING;
 import static org.apache.jackrabbit.oak.commons.FixturesHelper.Fixture.SEGMENT_MK;
 import static org.apache.jackrabbit.oak.commons.FixturesHelper.getFixtures;
 import static org.apache.jackrabbit.oak.plugins.memory.EmptyNodeState.EMPTY_NODE;
-import static org.apache.jackrabbit.oak.segment.SegmentNodeStore.builder;
-import static org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions.DEFAULT;
+import static org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions.defaultGCOptions;
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -75,7 +75,7 @@ public class CompactionAndCleanupIT {
             .getLogger(CompactionAndCleanupIT.class);
 
     @Rule
-    public TemporaryFolder folder = new TemporaryFolder();
+    public TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
     private File getFileStoreFolder() {
         return folder.getRoot();
@@ -88,11 +88,11 @@ public class CompactionAndCleanupIT {
     @Test
     public void compactionNoBinaryClone()
     throws IOException, CommitFailedException {
-        FileStore fileStore = FileStore.builder(getFileStoreFolder())
-                .withGCOptions(DEFAULT.setRetainedGenerations(2))
+        FileStore fileStore = fileStoreBuilder(getFileStoreFolder())
+                .withGCOptions(defaultGCOptions().setRetainedGenerations(2))
                 .withMaxFileSize(1)
                 .build();
-        SegmentNodeStore nodeStore = SegmentNodeStore.builder(fileStore).build();
+        SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
 
         try {
             // 5MB blob
@@ -170,10 +170,307 @@ public class CompactionAndCleanupIT {
         }
     }
 
+    @Test
+    public void offlineCompaction()
+    throws IOException, CommitFailedException {
+        SegmentGCOptions gcOptions = defaultGCOptions().setOffline();
+        FileStore fileStore = fileStoreBuilder(getFileStoreFolder())
+                .withMaxFileSize(1)
+                .withGCOptions(gcOptions)
+                .build();
+        SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
+
+        try {
+            // 5MB blob
+            int blobSize = 5 * 1024 * 1024;
+
+            // Create ~2MB of data
+            NodeBuilder extra = nodeStore.getRoot().builder();
+            NodeBuilder content = extra.child("content");
+            for (int i = 0; i < 10000; i++) {
+                NodeBuilder c = content.child("c" + i);
+                for (int j = 0; j < 1000; j++) {
+                    c.setProperty("p" + i, "v" + i);
+                }
+            }
+            nodeStore.merge(extra, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+            fileStore.flush();
+
+            long size1 = fileStore.size();
+            log.debug("File store size {}", byteCountToDisplaySize(size1));
+
+            // Create a property with 5 MB blob
+            NodeBuilder builder = nodeStore.getRoot().builder();
+            builder.setProperty("blob1", createBlob(nodeStore, blobSize));
+            nodeStore.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+            fileStore.flush();
+
+            long size2 = fileStore.size();
+            assertSize("1st blob added", size2, size1 + blobSize, size1 + blobSize + (blobSize / 100));
+
+            // Now remove the property. No gc yet -> size doesn't shrink
+            builder = nodeStore.getRoot().builder();
+            builder.removeProperty("blob1");
+            nodeStore.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+            fileStore.flush();
+
+            long size3 = fileStore.size();
+            assertSize("1st blob removed", size3, size2, size2 + 4096);
+
+            // 1st gc cycle -> 1st blob should get collected
+            fileStore.compact();
+            fileStore.cleanup();
+
+            long size4 = fileStore.size();
+            assertSize("1st gc", size4, size3 - blobSize - size1, size3
+                    - blobSize);
+
+            // Add another 5MB binary
+            builder = nodeStore.getRoot().builder();
+            builder.setProperty("blob2", createBlob(nodeStore, blobSize));
+            nodeStore.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+            fileStore.flush();
+
+            long size5 = fileStore.size();
+            assertSize("2nd blob added", size5, size4 + blobSize, size4 + blobSize + (blobSize / 100));
+
+            // 2st gc cycle -> 2nd blob should *not* be collected
+            fileStore.compact();
+            fileStore.cleanup();
+
+            long size6 = fileStore.size();
+            assertSize("2nd gc", size6, size5 * 10/11, size5 * 10/9);
+
+            // 3rd gc cycle -> no significant change
+            fileStore.compact();
+            fileStore.cleanup();
+
+            long size7 = fileStore.size();
+            assertSize("3rd gc", size7, size6 * 10/11 , size6 * 10/9);
+
+            // No data loss
+            byte[] blob = ByteStreams.toByteArray(nodeStore.getRoot()
+                    .getProperty("blob2").getValue(Type.BINARY).getNewStream());
+            assertEquals(blobSize, blob.length);
+        } finally {
+            fileStore.close();
+        }
+    }
+
+    /**
+     * Create a lot of data nodes (no binaries) and a few checkpoints, verify
+     * that compacting checkpoints will not cause the size to explode
+     */
+    @Test
+    public void offlineCompactionCps() throws IOException,
+            CommitFailedException {
+        SegmentGCOptions gcOptions = defaultGCOptions().setOffline();
+        FileStore fileStore = fileStoreBuilder(getFileStoreFolder())
+                .withMaxFileSize(1)
+                .withGCOptions(gcOptions)
+                .build();
+        SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
+        try {
+            // Create ~2MB of data
+            NodeBuilder extra = nodeStore.getRoot().builder();
+            NodeBuilder content = extra.child("content");
+            for (int i = 0; i < 10000; i++) {
+                NodeBuilder c = content.child("c" + i);
+                for (int j = 0; j < 1000; j++) {
+                    c.setProperty("p" + i, "v" + i);
+                }
+            }
+            nodeStore.merge(extra, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+            fileStore.flush();
+            fileStore.compact();
+            fileStore.cleanup();
+            // Compacts to 548Kb
+            long size0 = fileStore.size();
+
+            int cpNo = 4;
+            Set<String> cps = new HashSet<String>();
+            for (int i = 0; i < cpNo; i++) {
+                cps.add(nodeStore.checkpoint(60000));
+            }
+            assertEquals(cpNo, cps.size());
+            for (String cp : cps) {
+                assertTrue(nodeStore.retrieve(cp) != null);
+            }
+
+            long size1 = fileStore.size();
+            assertSize("with checkpoints added", size1, size0, size0 * 11 / 10);
+            fileStore.compact();
+            fileStore.cleanup();
+            long size2 = fileStore.size();
+            assertSize("with checkpoints compacted", size2, size1 * 9/10, size1 * 11 / 10);
+        } finally {
+            fileStore.close();
+        }
+    }
+
+    /**
+     * Create 2 binary nodes with same content but not same reference. Verify
+     * de-duplication capabilities of compaction.
+     */
+    @Test
+    public void offlineCompactionBinC1() throws IOException,
+            CommitFailedException {
+        SegmentGCOptions gcOptions = defaultGCOptions().setOffline()
+                .withBinaryDeduplication();
+        FileStore fileStore = fileStoreBuilder(getFileStoreFolder())
+                .withMaxFileSize(1).withGCOptions(gcOptions).build();
+        SegmentNodeStore nodeStore = SegmentNodeStoreBuilders
+                .builder(fileStore).build();
+
+        try {
+            NodeBuilder extra = nodeStore.getRoot().builder();
+            NodeBuilder content = extra.child("content");
+
+            int blobSize = 5 * 1024 * 1024;
+            byte[] data = new byte[blobSize];
+            new Random().nextBytes(data);
+
+            NodeBuilder c1 = content.child("c1");
+            Blob b1 = nodeStore.createBlob(new ByteArrayInputStream(data));
+            c1.setProperty("blob1", b1);
+            NodeBuilder c2 = content.child("c2");
+            Blob b2 = nodeStore.createBlob(new ByteArrayInputStream(data));
+            c2.setProperty("blob2", b2);
+            nodeStore.merge(extra, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+            fileStore.flush();
+
+            int cpNo = 4;
+            Set<String> cps = new HashSet<String>();
+            for (int i = 0; i < cpNo; i++) {
+                cps.add(nodeStore.checkpoint(60000));
+            }
+            assertEquals(cpNo, cps.size());
+            for (String cp : cps) {
+                assertTrue(nodeStore.retrieve(cp) != null);
+            }
+
+            long size1 = fileStore.size();
+            fileStore.compact();
+            fileStore.cleanup();
+            long size2 = fileStore.size();
+            assertSize("with compacted binaries", size2, 0, size1 - blobSize);
+        } finally {
+            fileStore.close();
+        }
+    }
+
+    /**
+     * Create 2 binary nodes with same content but not same reference. Reduce
+     * the max size if de-duplicated binaries under the binary length. Verify
+     * de-duplication capabilities of compaction.
+     */
+    @Test
+    public void offlineCompactionBinC2() throws IOException,
+            CommitFailedException {
+        int blobSize = 5 * 1024 * 1024;
+
+        SegmentGCOptions gcOptions = defaultGCOptions().setOffline()
+                .withBinaryDeduplication()
+                .setBinaryDeduplicationMaxSize(blobSize / 2);
+        FileStore fileStore = fileStoreBuilder(getFileStoreFolder())
+                .withMaxFileSize(1).withGCOptions(gcOptions).build();
+        SegmentNodeStore nodeStore = SegmentNodeStoreBuilders
+                .builder(fileStore).build();
+
+        try {
+            NodeBuilder extra = nodeStore.getRoot().builder();
+            NodeBuilder content = extra.child("content");
+
+            byte[] data = new byte[blobSize];
+            new Random().nextBytes(data);
+
+            NodeBuilder c1 = content.child("c1");
+            Blob b1 = nodeStore.createBlob(new ByteArrayInputStream(data));
+            c1.setProperty("blob1", b1);
+            NodeBuilder c2 = content.child("c2");
+            Blob b2 = nodeStore.createBlob(new ByteArrayInputStream(data));
+            c2.setProperty("blob2", b2);
+            nodeStore.merge(extra, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+            fileStore.flush();
+
+            int cpNo = 4;
+            Set<String> cps = new HashSet<String>();
+            for (int i = 0; i < cpNo; i++) {
+                cps.add(nodeStore.checkpoint(60000));
+            }
+            assertEquals(cpNo, cps.size());
+            for (String cp : cps) {
+                assertTrue(nodeStore.retrieve(cp) != null);
+            }
+
+            long size1 = fileStore.size();
+            fileStore.compact();
+            fileStore.cleanup();
+            long size2 = fileStore.size();
+
+            // not expected to reduce the size too much, as the binaries are
+            // above the threshold
+            assertSize("with compacted binaries", size2, size1 * 9 / 10,
+                    size1 * 11 / 10);
+        } finally {
+            fileStore.close();
+        }
+    }
+
+    /**
+     * Create 2 binary nodes with same content and same reference. Verify
+     * de-duplication capabilities of compaction
+     */
+    @Test
+    public void offlineCompactionBinR1() throws IOException,
+            CommitFailedException {
+        SegmentGCOptions gcOptions = defaultGCOptions().setOffline();
+        FileStore fileStore = fileStoreBuilder(getFileStoreFolder())
+                .withMaxFileSize(1).withGCOptions(gcOptions).build();
+        SegmentNodeStore nodeStore = SegmentNodeStoreBuilders
+                .builder(fileStore).build();
+
+        try {
+            NodeBuilder extra = nodeStore.getRoot().builder();
+            NodeBuilder content = extra.child("content");
+
+            int blobSize = 5 * 1024 * 1024;
+            byte[] data = new byte[blobSize];
+            new Random().nextBytes(data);
+            Blob b = nodeStore.createBlob(new ByteArrayInputStream(data));
+
+            NodeBuilder c1 = content.child("c1");
+            c1.setProperty("blob1", b);
+            NodeBuilder c2 = content.child("c2");
+            c2.setProperty("blob2", b);
+            nodeStore.merge(extra, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+            fileStore.flush();
+
+            int cpNo = 4;
+            Set<String> cps = new HashSet<String>();
+            for (int i = 0; i < cpNo; i++) {
+                cps.add(nodeStore.checkpoint(60000));
+            }
+            assertEquals(cpNo, cps.size());
+            for (String cp : cps) {
+                assertTrue(nodeStore.retrieve(cp) != null);
+            }
+
+            // 5Mb, de-duplication by the SegmentWriter
+            long size1 = fileStore.size();
+            fileStore.compact();
+            fileStore.cleanup();
+            long size2 = fileStore.size();
+            assertSize("with compacted binaries", size2, 0, size1 * 11 / 10);
+        } finally {
+            fileStore.close();
+        }
+    }
+
     private static void assertSize(String info, long size, long lower, long upper) {
         log.debug("File Store {} size {}, expected in interval [{},{}]",
                 info, size, lower, upper);
-        assertTrue("File Store " + log + " size expected in interval " +
+        assertTrue("File Store " + info + " size expected in interval " +
                 "[" + (lower) + "," + (upper) + "] but was: " + (size),
                 size >= lower && size <= (upper));
     }
@@ -187,11 +484,11 @@ public class CompactionAndCleanupIT {
     @Test
     public void testCancelCompaction()
     throws Throwable {
-        final FileStore fileStore = FileStore.builder(getFileStoreFolder())
-                .withGCOptions(DEFAULT.setRetainedGenerations(2))
+        final FileStore fileStore = fileStoreBuilder(getFileStoreFolder())
+                .withGCOptions(defaultGCOptions().setRetainedGenerations(2))
                 .withMaxFileSize(1)
                 .build();
-        SegmentNodeStore nodeStore = SegmentNodeStore.builder(fileStore).build();
+        SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
 
         NodeBuilder builder = nodeStore.getRoot().builder();
         addNodes(builder, 10);
@@ -240,12 +537,12 @@ public class CompactionAndCleanupIT {
      */
     @Test
     public void testMixedSegments() throws Exception {
-        FileStore store = FileStore.builder(getFileStoreFolder())
+        FileStore store = fileStoreBuilder(getFileStoreFolder())
                 .withMaxFileSize(2)
                 .withMemoryMapping(true)
-                .withGCOptions(DEFAULT.setForceAfterFail(true))
+                .withGCOptions(defaultGCOptions().setForceAfterFail(true))
                 .build();
-        final SegmentNodeStore nodeStore = SegmentNodeStore.builder(store).build();
+        final SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(store).build();
         final AtomicBoolean compactionSuccess = new AtomicBoolean(true);
 
         NodeBuilder root = nodeStore.getRoot().builder();
@@ -253,7 +550,7 @@ public class CompactionAndCleanupIT {
         nodeStore.merge(root, EmptyHook.INSTANCE, CommitInfo.EMPTY);
 
         final Set<UUID> beforeSegments = new HashSet<UUID>();
-        collectSegments(store.getHead(), beforeSegments);
+        collectSegments(store.getReader(), store.getRevisions(), beforeSegments);
 
         final AtomicReference<Boolean> run = new AtomicReference<Boolean>(true);
         final List<String> failedCommits = newArrayList();
@@ -292,7 +589,7 @@ public class CompactionAndCleanupIT {
         assertTrue("Failed commits: " + failedCommits, failedCommits.isEmpty());
 
         Set<UUID> afterSegments = new HashSet<UUID>();
-        collectSegments(store.getHead(), afterSegments);
+        collectSegments(store.getReader(), store.getRevisions(), afterSegments);
         try {
             for (UUID u : beforeSegments) {
                 assertFalse("Mixed segments found: " + u, afterSegments.contains(u));
@@ -312,8 +609,8 @@ public class CompactionAndCleanupIT {
      */
     @Test
     public void cleanupCyclicGraph() throws IOException, ExecutionException, InterruptedException {
-        FileStore fileStore = FileStore.builder(getFileStoreFolder()).build();
-        final SegmentWriter writer = fileStore.getTracker().getWriter();
+        FileStore fileStore = fileStoreBuilder(getFileStoreFolder()).build();
+        final SegmentWriter writer = fileStore.getWriter();
         final SegmentNodeState oldHead = fileStore.getHead();
 
         final SegmentNodeState child = run(new Callable<SegmentNodeState>() {
@@ -333,10 +630,10 @@ public class CompactionAndCleanupIT {
         });
 
         writer.flush();
-        fileStore.setHead(oldHead, newHead);
+        fileStore.getRevisions().setHead(oldHead.getRecordId(), newHead.getRecordId());
         fileStore.close();
 
-        fileStore = FileStore.builder(getFileStoreFolder()).build();
+        fileStore = fileStoreBuilder(getFileStoreFolder()).build();
 
         traverse(fileStore.getHead());
         fileStore.cleanup();
@@ -371,13 +668,12 @@ public class CompactionAndCleanupIT {
     @Test
     public void preCompactionReferences() throws IOException, CommitFailedException, InterruptedException {
         for (String ref : new String[] {"merge-before-compact", "merge-after-compact"}) {
-            SegmentGCOptions gcOptions = DEFAULT;
             File repoDir = new File(getFileStoreFolder(), ref);
-            FileStore fileStore = FileStore.builder(repoDir)
+            FileStore fileStore = fileStoreBuilder(repoDir)
                     .withMaxFileSize(2)
-                    .withGCOptions(gcOptions)
+                    .withGCOptions(defaultGCOptions())
                     .build();
-            final SegmentNodeStore nodeStore = builder(fileStore).build();
+            final SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
             try {
                 // add some content
                 NodeBuilder preGCBuilder = nodeStore.getRoot().builder();
@@ -407,7 +703,7 @@ public class CompactionAndCleanupIT {
 
                 // Ensure cleanup is efficient by surpassing the number of
                 // retained generations
-                for (int k = 0; k < gcOptions.getRetainedGenerations(); k++) {
+                for (int k = 0; k < defaultGCOptions().getRetainedGenerations(); k++) {
                     fileStore.compact();
                 }
 
@@ -423,7 +719,7 @@ public class CompactionAndCleanupIT {
             }
 
             // Re-initialise the file store to simulate off-line gc
-            fileStore = FileStore.builder(repoDir).withMaxFileSize(2).build();
+            fileStore = fileStoreBuilder(repoDir).withMaxFileSize(2).build();
             try {
                 // The 1M blob should get gc-ed
                 fileStore.cleanup();
@@ -435,8 +731,9 @@ public class CompactionAndCleanupIT {
         }
     }
 
-    private static void collectSegments(SegmentNodeState s, final Set<UUID> segmentIds) {
-        new SegmentParser() {
+    private static void collectSegments(SegmentReader reader, Revisions revisions,
+                                        final Set<UUID> segmentIds) {
+        new SegmentParser(reader) {
             @Override
             protected void onNode(RecordId parentId, RecordId nodeId) {
                 super.onNode(parentId, nodeId);
@@ -508,7 +805,7 @@ public class CompactionAndCleanupIT {
                 super.onListBucket(parentId, listId, index, count, capacity);
                 segmentIds.add(listId.asUUID());
             }
-        }.parseNode(s.getRecordId());
+        }.parseNode(revisions.getHead());
     }
 
     private static void createNodes(NodeBuilder builder, int count, int depth) {
@@ -529,13 +826,13 @@ public class CompactionAndCleanupIT {
 
     @Test
     public void propertyRetention() throws IOException, CommitFailedException {
-        SegmentGCOptions gcOptions = DEFAULT;
-        FileStore fileStore = FileStore.builder(getFileStoreFolder())
+        SegmentGCOptions gcOptions = defaultGCOptions();
+        FileStore fileStore = fileStoreBuilder(getFileStoreFolder())
                 .withMaxFileSize(1)
                 .withGCOptions(gcOptions)
                 .build();
         try {
-            final SegmentNodeStore nodeStore = SegmentNodeStore.builder(fileStore).build();
+            final SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
 
             // Add a property
             NodeBuilder builder = nodeStore.getRoot().builder();
@@ -569,7 +866,7 @@ public class CompactionAndCleanupIT {
 
             try {
                 fileStore.readSegment(id);
-                fail("Segment " + id + "should be gc'ed");
+                fail("Segment " + id + " should be gc'ed");
             } catch (SegmentNotFoundException ignore) {}
         } finally {
             fileStore.close();
@@ -578,9 +875,9 @@ public class CompactionAndCleanupIT {
 
     @Test
     public void checkpointDeduplicationTest() throws IOException, CommitFailedException {
-        FileStore fileStore = FileStore.builder(getFileStoreFolder()).build();
+        FileStore fileStore = fileStoreBuilder(getFileStoreFolder()).build();
         try {
-            SegmentNodeStore nodeStore = SegmentNodeStore.builder(fileStore).build();
+            SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
             NodeBuilder builder = nodeStore.getRoot().builder();
             builder.setChildNode("a").setChildNode("aa");
             builder.setChildNode("b").setChildNode("bb");

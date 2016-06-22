@@ -67,6 +67,7 @@ import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import javax.jcr.PropertyType;
 import javax.management.NotCompliantMBeanException;
+import javax.management.openmbean.CompositeData;
 
 import com.google.common.base.Function;
 import com.google.common.base.Predicate;
@@ -79,13 +80,13 @@ import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.UncheckedExecutionException;
 
+import org.apache.jackrabbit.api.stats.TimeSeries;
 import org.apache.jackrabbit.oak.commons.IOUtils;
 import org.apache.jackrabbit.oak.commons.jmx.AnnotatedStandardMBean;
 import org.apache.jackrabbit.oak.plugins.blob.BlobStoreBlob;
 import org.apache.jackrabbit.oak.plugins.blob.MarkSweepGarbageCollector;
 import org.apache.jackrabbit.oak.plugins.blob.ReferencedBlob;
 import org.apache.jackrabbit.oak.plugins.document.Branch.BranchCommit;
-import org.apache.jackrabbit.oak.plugins.document.cache.CacheInvalidationStats;
 import org.apache.jackrabbit.oak.plugins.document.persistentCache.PersistentCache;
 import org.apache.jackrabbit.oak.plugins.document.persistentCache.broadcast.DynamicBroadcastConfig;
 import org.apache.jackrabbit.oak.plugins.document.util.ReadOnlyDocumentStoreWrapperFactory;
@@ -116,7 +117,9 @@ import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStateDiff;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.apache.jackrabbit.oak.stats.Clock;
+import org.apache.jackrabbit.oak.stats.StatisticsProvider;
 import org.apache.jackrabbit.oak.util.PerfLogger;
+import org.apache.jackrabbit.stats.TimeSeriesStatsUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -124,7 +127,7 @@ import org.slf4j.LoggerFactory;
  * Implementation of a NodeStore on {@link DocumentStore}.
  */
 public final class DocumentNodeStore
-        implements NodeStore, RevisionContext, Observable, Clusterable {
+        implements NodeStore, RevisionContext, Observable, Clusterable, NodeStateDiffer {
 
     private static final Logger LOG = LoggerFactory.getLogger(DocumentNodeStore.class);
 
@@ -409,8 +412,16 @@ public final class DocumentNodeStore
 
     private final boolean readOnlyMode;
 
+    private DocumentNodeStateCache nodeStateCache = DocumentNodeStateCache.NOOP;
+
+    private final DocumentNodeStoreStatsCollector nodeStoreStatsCollector;
+
+    private final StatisticsProvider statisticsProvider;
+
     public DocumentNodeStore(DocumentMK.Builder builder) {
         this.blobStore = builder.getBlobStore();
+        this.statisticsProvider = builder.getStatisticsProvider();
+        this.nodeStoreStatsCollector = builder.getNodeStoreStatsCollector();
         if (builder.isUseSimpleRevision()) {
             this.simpleRevisionCounter = new AtomicInteger(0);
         }
@@ -859,6 +870,14 @@ public final class DocumentNodeStore
         }
     }
 
+    @CheckForNull
+    AbstractDocumentNodeState getSecondaryNodeState(@Nonnull final String path,
+                              @Nonnull final RevisionVector rootRevision,
+                              @Nonnull final RevisionVector rev) {
+        //Check secondary cache first
+        return nodeStateCache.getDocumentNodeState(path, rootRevision, rev);
+    }
+
     /**
      * Get the node for the given path and revision. The returned object might
      * not be modified directly.
@@ -901,7 +920,7 @@ public final class DocumentNodeStore
         }
     }
 
-    DocumentNodeState.Children getChildren(@Nonnull final DocumentNodeState parent,
+    DocumentNodeState.Children getChildren(@Nonnull final AbstractDocumentNodeState parent,
                               @Nullable final String name,
                               final int limit)
             throws DocumentStoreException {
@@ -950,7 +969,7 @@ public final class DocumentNodeStore
      * @param limit the maximum number of child nodes to return.
      * @return the children of {@code parent}.
      */
-    DocumentNodeState.Children readChildren(DocumentNodeState parent,
+    DocumentNodeState.Children readChildren(AbstractDocumentNodeState parent,
                                             String name, int limit) {
         String queriedName = name;
         String path = parent.getPath();
@@ -1485,8 +1504,9 @@ public final class DocumentNodeStore
      *         {@code false} if it was aborted as requested by the handler
      *         (see the {@link NodeStateDiff} contract for more details)
      */
-    boolean compare(@Nonnull final DocumentNodeState node,
-                    @Nonnull final DocumentNodeState base,
+    @Override
+    public boolean compare(@Nonnull final AbstractDocumentNodeState node,
+                    @Nonnull final AbstractDocumentNodeState base,
                     @Nonnull NodeStateDiff diff) {
         if (!AbstractNodeState.comparePropertiesAgainstBaseState(node, base, diff)) {
             return false;
@@ -1718,6 +1738,7 @@ public final class DocumentNodeStore
     }
 
     private void internalRunBackgroundUpdateOperations() {
+        BackgroundWriteStats stats = null;
         synchronized (backgroundWriteMonitor) {
             long start = clock.getTime();
             long time = start;
@@ -1730,17 +1751,20 @@ public final class DocumentNodeStore
             backgroundSplit();
             long splitTime = clock.getTime() - time;
             // write back pending updates to _lastRev
-            BackgroundWriteStats stats = backgroundWrite();
+            stats = backgroundWrite();
             stats.split = splitTime;
             stats.clean = cleanTime;
+            stats.totalWriteTime = clock.getTime() - start;
             String msg = "Background operations stats ({})";
-            if (clock.getTime() - start > TimeUnit.SECONDS.toMillis(10)) {
+            if (stats.totalWriteTime > TimeUnit.SECONDS.toMillis(10)) {
                 // log as info if it took more than 10 seconds
                 LOG.info(msg, stats);
             } else {
                 LOG.debug(msg, stats);
             }
         }
+        //Push stats outside of sync block
+        nodeStoreStatsCollector.doneBackgroundUpdate(stats);
     }
 
     //----------------------< background read operations >----------------------
@@ -1763,19 +1787,21 @@ public final class DocumentNodeStore
 
     /** OAK-2624 : background read operations are split from background update ops */
     private void internalRunBackgroundReadOperations() {
+        BackgroundReadStats readStats = null;
         synchronized (backgroundReadMonitor) {
             long start = clock.getTime();
             // pull in changes from other cluster nodes
-            BackgroundReadStats readStats = backgroundRead();
-            long readTime = clock.getTime() - start;
+            readStats = backgroundRead();
+            readStats.totalReadTime = clock.getTime() - start;
             String msg = "Background read operations stats (read:{} {})";
             if (clock.getTime() - start > TimeUnit.SECONDS.toMillis(10)) {
                 // log as info if it took more than 10 seconds
-                LOG.info(msg, readTime, readStats);
+                LOG.info(msg, readStats.totalReadTime, readStats);
             } else {
-                LOG.debug(msg, readTime, readStats);
+                LOG.debug(msg, readStats.totalReadTime, readStats);
             }
         }
+        nodeStoreStatsCollector.doneBackgroundRead(readStats);
     }
 
     /**
@@ -1899,6 +1925,7 @@ public final class DocumentNodeStore
                 } else {
                     try {
                         externalSort.sort();
+                        stats.numExternalChanges = externalSort.getSize();
                         stats.cacheStats = store.invalidateCache(pathToId(externalSort));
                         // OAK-3002: only invalidate affected items (using journal)
                         long origSize = docChildrenCache.size();
@@ -1963,31 +1990,6 @@ public final class DocumentNodeStore
         }
 
         return stats;
-    }
-
-    private static class BackgroundReadStats {
-        CacheInvalidationStats cacheStats;
-        long readHead;
-        long cacheInvalidationTime;
-        long populateDiffCache;
-        long lock;
-        long dispatchChanges;
-
-        @Override
-        public String toString() {
-            String cacheStatsMsg = "NOP";
-            if (cacheStats != null){
-                cacheStatsMsg = cacheStats.summaryReport();
-            }
-            return  "ReadStats{" +
-                    "cacheStats:" + cacheStatsMsg +
-                    ", head:" + readHead +
-                    ", cache:" + cacheInvalidationTime +
-                    ", diff: " + populateDiffCache +
-                    ", lock:" + lock +
-                    ", dispatch:" + dispatchChanges +
-                    '}';
-        }
     }
 
     private void cleanOrphanedBranches() {
@@ -2185,8 +2187,8 @@ public final class DocumentNodeStore
     }
 
     private boolean dispatch(@Nonnull final String jsonDiff,
-                             @Nonnull final DocumentNodeState node,
-                             @Nonnull final DocumentNodeState base,
+                             @Nonnull final AbstractDocumentNodeState node,
+                             @Nonnull final AbstractDocumentNodeState base,
                              @Nonnull final NodeStateDiff diff) {
         return DiffCache.parseJsopDiff(jsonDiff, new DiffCache.Diff() {
             @Override
@@ -2265,7 +2267,7 @@ public final class DocumentNodeStore
         return false;
     }
 
-    private String diffImpl(DocumentNodeState from, DocumentNodeState to)
+    private String diffImpl(AbstractDocumentNodeState from, AbstractDocumentNodeState to)
             throws DocumentStoreException {
         JsopWriter w = new JsopStream();
         // TODO this does not work well for large child node lists
@@ -2618,6 +2620,36 @@ public final class DocumentNodeStore
         public long determineServerTimeDifferenceMillis() {
             return store.determineServerTimeDifferenceMillis();
         }
+
+        @Override
+        public CompositeData getMergeSuccessHistory() {
+            return getTimeSeriesData(DocumentNodeStoreStats.MERGE_SUCCESS_COUNT, "Merge Success Count");
+        }
+
+        @Override
+        public CompositeData getMergeFailureHistory() {
+            return getTimeSeriesData(DocumentNodeStoreStats.MERGE_FAILED_EXCLUSIVE, "Merge failure count");
+        }
+
+        @Override
+        public CompositeData getExternalChangeCountHistory() {
+            return getTimeSeriesData(DocumentNodeStoreStats.BGR_NUM_CHANGES_RATE, "Count of nodes modified by other " +
+                    "cluster nodes since last background read");
+        }
+
+        @Override
+        public CompositeData getBackgroundUpdateCountHistory() {
+            return getTimeSeriesData(DocumentNodeStoreStats.BGW_NUM_WRITES_RATE, "Count of nodes updated as part of " +
+                    "background update");
+        }
+
+        private CompositeData getTimeSeriesData(String name, String desc){
+            return TimeSeriesStatsUtil.asCompositeData(getTimeSeries(name), desc);
+        }
+
+        private TimeSeries getTimeSeries(String name) {
+            return statisticsProvider.getStats().getTimeSeries(name, true);
+        }
     }
 
     static abstract class NodeStoreTask implements Runnable {
@@ -2784,5 +2816,13 @@ public final class DocumentNodeStore
     @Override
     public String getInstanceId() {
         return String.valueOf(getClusterId());
+    }
+
+    public DocumentNodeStoreStatsCollector getStatsCollector() {
+        return nodeStoreStatsCollector;
+    }
+
+    public void setNodeStateCache(DocumentNodeStateCache nodeStateCache) {
+        this.nodeStateCache = nodeStateCache;
     }
 }

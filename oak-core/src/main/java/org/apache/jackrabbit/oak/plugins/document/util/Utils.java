@@ -264,7 +264,6 @@ public class Utils {
      *     <li>If id is for root path</li>
      *     <li>If id is for an invalid path</li>
      * </ul>
-     *</p>
      * @param id id for which parent id needs to be determined
      * @return parent id. null if parent id cannot be determined
      */
@@ -757,5 +756,37 @@ public class Utils {
             min = Math.min(r.getTimestamp(), min);
         }
         return min;
+    }
+
+    /**
+     * Wraps the given iterable and aborts iteration over elements when the
+     * predicate on an element evaluates to {@code false}.
+     *
+     * @param iterable the iterable to wrap.
+     * @param p the predicate.
+     * @return the aborting iterable.
+     */
+    public static <T> Iterable<T> abortingIterable(final Iterable<T> iterable,
+                                                   final Predicate<T> p) {
+        checkNotNull(iterable);
+        checkNotNull(p);
+        return new Iterable<T>() {
+            @Override
+            public Iterator<T> iterator() {
+                final Iterator<T> it = iterable.iterator();
+                return new AbstractIterator<T>() {
+                    @Override
+                    protected T computeNext() {
+                        if (it.hasNext()) {
+                            T next = it.next();
+                            if (p.apply(next)) {
+                                return next;
+                            }
+                        }
+                        return endOfData();
+                    }
+                };
+            }
+        };
     }
 }

@@ -22,12 +22,21 @@ import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.util.Random;
 
-import org.apache.jackrabbit.oak.segment.SegmentId;
-import org.apache.jackrabbit.oak.segment.SegmentIdTable;
-import org.apache.jackrabbit.oak.segment.SegmentTracker;
 import org.apache.jackrabbit.oak.segment.memory.MemoryStore;
 
 public class SegmentIdTableBenchmark {
+
+    private static SegmentIdFactory newSegmentIdMaker(final SegmentStore store) {
+        return new SegmentIdFactory() {
+
+            @Override
+            public SegmentId newSegmentId(long msb, long lsb) {
+                return new SegmentId(store, msb, lsb);
+            }
+
+        };
+    }
+
     public static void main(String... args) throws IOException {
         test();
         test();
@@ -49,18 +58,19 @@ public class SegmentIdTableBenchmark {
         }
         
         time = System.currentTimeMillis();
-        SegmentTracker tracker = new MemoryStore().getTracker();
-        final SegmentIdTable tbl = new SegmentIdTable(tracker);
+        MemoryStore store = new MemoryStore();
+        SegmentIdFactory maker = newSegmentIdMaker(store);
+        final SegmentIdTable tbl = new SegmentIdTable();
         for (int i = 0; i < repeat; i++) {
             for (int j = 0; j < count; j++) {
-                tbl.getSegmentId(j, array[j]);
+                tbl.newSegmentId(j, array[j], maker);
             }
         }
         time = System.currentTimeMillis() - time;
         System.out.println("SegmentIdTable: " + time);
         
         time = System.currentTimeMillis();
-        ConcurrentTable cm = new ConcurrentTable(tracker, 16 * 1024);
+        ConcurrentTable cm = new ConcurrentTable(store, 16 * 1024);
         for (int i = 0; i < repeat; i++) {
             for (int j = 0; j < count; j++) {
                 cm.getSegmentId(j, array[j]);
@@ -84,11 +94,11 @@ public class SegmentIdTableBenchmark {
     }
     
     static class ConcurrentTable {
-        private final SegmentTracker tracker;
+        private final SegmentStore store;
         volatile WeakReference<SegmentId>[] map;
         @SuppressWarnings("unchecked")
-        ConcurrentTable(SegmentTracker tracker, int size) {
-            this.tracker = tracker;
+        ConcurrentTable(SegmentStore store, int size) {
+            this.store = store;
             map = (WeakReference<SegmentId>[]) new WeakReference[size];
         }
         SegmentId getSegmentId(long a, long b) {
@@ -101,7 +111,7 @@ public class SegmentIdTableBenchmark {
                 while (true) {
                     WeakReference<SegmentId> ref = m[index];
                     if (ref == null) {
-                        SegmentId id = new SegmentId(tracker, a, b);
+                        SegmentId id = new SegmentId(store, a, b);
                         ref = new WeakReference<SegmentId>(id);
                         m[index] = ref;
                         if (m != map) {

@@ -36,6 +36,7 @@ import com.google.common.collect.ImmutableSet;
 import org.apache.jackrabbit.api.JackrabbitSession;
 import org.apache.jackrabbit.api.security.user.UserManager;
 import org.apache.jackrabbit.oak.Oak;
+import org.apache.jackrabbit.oak.api.ContentRepository;
 import org.apache.jackrabbit.oak.benchmark.AbstractTest;
 import org.apache.jackrabbit.oak.fixture.JcrCreator;
 import org.apache.jackrabbit.oak.fixture.OakRepositoryFixture;
@@ -57,6 +58,7 @@ import org.apache.jackrabbit.oak.spi.security.authentication.external.basic.Defa
 import org.apache.jackrabbit.oak.spi.security.authentication.external.impl.DefaultSyncConfigImpl;
 import org.apache.jackrabbit.oak.spi.security.authentication.external.impl.DefaultSyncHandler;
 import org.apache.jackrabbit.oak.spi.security.authentication.external.impl.ExternalIDPManagerImpl;
+import org.apache.jackrabbit.oak.spi.security.authentication.external.impl.SyncHandlerMapping;
 import org.apache.jackrabbit.oak.spi.security.authentication.external.impl.SyncManagerImpl;
 import org.apache.jackrabbit.oak.spi.security.authentication.external.impl.principal.ExternalPrincipalConfiguration;
 import org.apache.jackrabbit.oak.spi.security.principal.CompositePrincipalConfiguration;
@@ -66,9 +68,9 @@ import org.apache.jackrabbit.oak.spi.security.user.UserConstants;
 import org.apache.jackrabbit.oak.spi.whiteboard.Whiteboard;
 import org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardUtils;
 import org.apache.sling.testing.mock.osgi.context.OsgiContextImpl;
-import org.apache.sling.testing.mock.osgi.junit.OsgiContext;
 
 import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 
 /**
  * Base benchmark test for external authentication.
@@ -92,6 +94,9 @@ abstract class AbstractExternalTest extends AbstractTest {
     private final Random random = new Random();
     private final ExternalPrincipalConfiguration externalPrincipalConfiguration = new ExternalPrincipalConfiguration();
 
+    private ContentRepository contentRepository;
+    private final SecurityProvider securityProvider = new TestSecurityProvider(ConfigurationParameters.EMPTY);
+
     final DefaultSyncConfig syncConfig = new DefaultSyncConfig();
     final SyncHandler syncHandler = new DefaultSyncHandler(syncConfig);
 
@@ -114,6 +119,15 @@ abstract class AbstractExternalTest extends AbstractTest {
     }
 
     protected abstract Configuration createConfiguration();
+
+    protected ContentRepository getContentRepository() {
+        checkState(contentRepository != null);
+        return contentRepository;
+    }
+
+    protected SecurityProvider getSecurityProvider() {
+        return securityProvider;
+    }
 
     protected String getRandomUserId() {
         int index = random.nextInt(((TestIdentityProvider) idp).numberOfUsers);
@@ -189,12 +203,19 @@ abstract class AbstractExternalTest extends AbstractTest {
 
                         // now register the sync-handler with the dynamic membership config
                         // in order to enable dynamic membership with the external principal configuration
-                        Map props = ImmutableMap.of(DefaultSyncConfigImpl.PARAM_USER_DYNAMIC_MEMBERSHIP, syncConfig.user().getDynamicMembership());
+                        Map props = ImmutableMap.of(
+                                DefaultSyncConfigImpl.PARAM_USER_DYNAMIC_MEMBERSHIP, syncConfig.user().getDynamicMembership(),
+                                DefaultSyncConfigImpl.PARAM_GROUP_AUTO_MEMBERSHIP, syncConfig.user().getAutoMembership());
                         context.registerService(SyncHandler.class, WhiteboardUtils.getService(whiteboard, SyncHandler.class), props);
-                    }
 
-                    SecurityProvider sp = new TestSecurityProvider(ConfigurationParameters.EMPTY);
-                    return new Jcr(oak).with(sp);
+                        Map shMappingProps = ImmutableMap.of(
+                                SyncHandlerMapping.PARAM_IDP_NAME, idp.getName(),
+                                SyncHandlerMapping.PARAM_SYNC_HANDLER_NAME, syncConfig.getName());
+                        context.registerService(SyncHandlerMapping.class, new SyncHandlerMapping() {}, shMappingProps);
+                    }
+                    Jcr jcr = new Jcr(oak).with(securityProvider);
+                    contentRepository = jcr.createContentRepository();
+                    return jcr;
                 }
             });
         } else {

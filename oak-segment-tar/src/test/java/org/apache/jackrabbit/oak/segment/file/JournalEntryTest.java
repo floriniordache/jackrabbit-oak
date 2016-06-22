@@ -19,6 +19,7 @@
 
 package org.apache.jackrabbit.oak.segment.file;
 
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -30,8 +31,7 @@ import java.util.List;
 import com.google.common.base.Splitter;
 import com.google.common.io.Files;
 import org.apache.jackrabbit.oak.segment.SegmentNodeStore;
-import org.apache.jackrabbit.oak.segment.file.FileStore;
-import org.apache.jackrabbit.oak.segment.file.JournalReader;
+import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
@@ -42,14 +42,14 @@ import org.junit.rules.TemporaryFolder;
 public class JournalEntryTest {
 
     @Rule
-    public TemporaryFolder tempFolder = new TemporaryFolder();
+    public TemporaryFolder tempFolder = new TemporaryFolder(new File("target"));
 
     @Test
     public void timestampInJournalEntry() throws Exception{
-        FileStore fileStore = FileStore.builder(tempFolder.getRoot()).withMaxFileSize(5)
+        FileStore fileStore = fileStoreBuilder(tempFolder.getRoot()).withMaxFileSize(5)
                 .withNoCache().withMemoryMapping(true).build();
 
-        SegmentNodeStore nodeStore = SegmentNodeStore.builder(fileStore).build();
+        SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
 
         long startTime = System.currentTimeMillis();
 
@@ -75,7 +75,7 @@ public class JournalEntryTest {
         assertTrue(entryTime >= startTime);
 
         JournalReader jr = new JournalReader(journal);
-        assertEquals(journalParts(lines.get(lines.size() - 1)).get(0), jr.iterator().next());
+        assertEquals(journalParts(lines.get(lines.size() - 1)).get(0), jr.next());
         jr.close();
     }
 

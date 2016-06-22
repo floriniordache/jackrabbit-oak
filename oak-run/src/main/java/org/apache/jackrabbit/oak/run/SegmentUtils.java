@@ -17,28 +17,44 @@
 
 package org.apache.jackrabbit.oak.run;
 
+import static com.google.common.collect.Lists.reverse;
 import static com.google.common.collect.Sets.newHashSet;
+import static com.google.common.collect.Sets.newTreeSet;
+import static com.google.common.escape.Escapers.builder;
+import static javax.jcr.PropertyType.BINARY;
+import static javax.jcr.PropertyType.STRING;
 import static org.apache.commons.io.FileUtils.byteCountToDisplaySize;
+import static org.apache.jackrabbit.oak.commons.PathUtils.elements;
 import static org.apache.jackrabbit.oak.plugins.segment.FileStoreHelper.newBasicReadOnlyBlobStore;
+import static org.apache.jackrabbit.oak.plugins.segment.FileStoreHelper.openFileStore;
 import static org.apache.jackrabbit.oak.plugins.segment.FileStoreHelper.openReadOnlyFileStore;
+import static org.apache.jackrabbit.oak.plugins.segment.FileStoreHelper.readRevisions;
+import static org.apache.jackrabbit.oak.plugins.segment.RecordId.fromString;
 import static org.apache.jackrabbit.oak.plugins.segment.RecordType.NODE;
 import static org.apache.jackrabbit.oak.plugins.segment.SegmentGraph.writeGCGraph;
 import static org.apache.jackrabbit.oak.plugins.segment.SegmentGraph.writeSegmentGraph;
+import static org.apache.jackrabbit.oak.plugins.segment.SegmentNodeStateHelper.getTemplateId;
+import static org.apache.jackrabbit.oak.plugins.segment.file.tooling.ConsistencyChecker.checkConsistency;
 import static org.apache.jackrabbit.oak.run.Utils.asCloseable;
 import static org.slf4j.LoggerFactory.getLogger;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.PrintWriter;
+import java.io.RandomAccessFile;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -47,9 +63,13 @@ import ch.qos.logback.classic.Logger;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Queues;
 import com.google.common.io.Closer;
+import org.apache.commons.io.FileUtils;
+import org.apache.jackrabbit.oak.api.Blob;
+import org.apache.jackrabbit.oak.api.PropertyState;
+import org.apache.jackrabbit.oak.api.Type;
+import org.apache.jackrabbit.oak.commons.IOUtils;
 import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.commons.json.JsopBuilder;
-import org.apache.jackrabbit.oak.explorer.NodeStoreTree;
 import org.apache.jackrabbit.oak.json.JsopDiff;
 import org.apache.jackrabbit.oak.plugins.backup.FileStoreBackup;
 import org.apache.jackrabbit.oak.plugins.backup.FileStoreRestore;
@@ -57,18 +77,32 @@ import org.apache.jackrabbit.oak.plugins.segment.PCMAnalyser;
 import org.apache.jackrabbit.oak.plugins.segment.RecordId;
 import org.apache.jackrabbit.oak.plugins.segment.RecordUsageAnalyser;
 import org.apache.jackrabbit.oak.plugins.segment.Segment;
+import org.apache.jackrabbit.oak.plugins.segment.SegmentBlob;
 import org.apache.jackrabbit.oak.plugins.segment.SegmentId;
 import org.apache.jackrabbit.oak.plugins.segment.SegmentNodeState;
 import org.apache.jackrabbit.oak.plugins.segment.SegmentNodeStore;
+import org.apache.jackrabbit.oak.plugins.segment.SegmentNotFoundException;
+import org.apache.jackrabbit.oak.plugins.segment.SegmentPropertyState;
 import org.apache.jackrabbit.oak.plugins.segment.SegmentTracker;
+import org.apache.jackrabbit.oak.plugins.segment.compaction.CompactionStrategy;
 import org.apache.jackrabbit.oak.plugins.segment.file.FileStore;
+import org.apache.jackrabbit.oak.plugins.segment.file.FileStore.ReadOnlyStore;
+import org.apache.jackrabbit.oak.plugins.segment.file.JournalReader;
+import org.apache.jackrabbit.oak.plugins.segment.file.tooling.RevisionHistory;
+import org.apache.jackrabbit.oak.spi.state.ChildNodeEntry;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 
 class SegmentUtils {
 
+    private final static int MAX_CHAR_DISPLAY = Integer.getInteger("max.char.display", 60);
+
     private SegmentUtils() {
         // Prevent instantiation
+    }
+
+    static NodeStore bootstrapNodeStore(String path, Closer closer) throws IOException {
+        return SegmentNodeStore.builder(bootstrapFileStore(path, closer)).build();
     }
 
     static void backup(File source, File target) throws IOException {
@@ -120,6 +154,210 @@ class SegmentUtils {
             writeGCGraph(fileStore, out);
         } else {
             writeSegmentGraph(fileStore, out, epoch, regex);
+        }
+    }
+
+    static void history(File directory, File journal, String path, int depth) throws IOException {
+        Iterable<RevisionHistory.HistoryElement> history = new RevisionHistory(directory).getHistory(journal, path);
+        for (RevisionHistory.HistoryElement historyElement : history) {
+            System.out.println(historyElement.toString(depth));
+        }
+    }
+
+    static void check(File dir, String journalFileName, boolean fullTraversal, long debugLevel, long binLen) throws IOException {
+        checkConsistency(dir, journalFileName, fullTraversal, debugLevel, binLen);
+    }
+
+    static void compact(File directory, boolean force) throws IOException {
+        FileStore store = openFileStore(directory.getAbsolutePath(), force);
+        try {
+            boolean persistCM = Boolean.getBoolean("tar.PersistCompactionMap");
+            System.out.println("Compacting " + directory);
+            System.out.println("    before " + Arrays.toString(directory.list()));
+            long sizeBefore = FileUtils.sizeOfDirectory(directory);
+            System.out.println("    size "
+                    + IOUtils.humanReadableByteCount(sizeBefore) + " (" + sizeBefore
+                    + " bytes)");
+
+            System.out.println("    -> compacting");
+
+            CompactionStrategy compactionStrategy = new CompactionStrategy(
+                    false, CompactionStrategy.CLONE_BINARIES_DEFAULT,
+                    CompactionStrategy.CleanupType.CLEAN_ALL, 0,
+                    CompactionStrategy.MEMORY_THRESHOLD_DEFAULT) {
+
+                @Override
+                public boolean compacted(Callable<Boolean> setHead)
+                        throws Exception {
+                    // oak-run is doing compaction single-threaded
+                    // hence no guarding needed - go straight ahead
+                    // and call setHead
+                    return setHead.call();
+                }
+            };
+            compactionStrategy.setOfflineCompaction(true);
+            compactionStrategy.setPersistCompactionMap(persistCM);
+            store.setCompactionStrategy(compactionStrategy);
+            store.compact();
+        } finally {
+            store.close();
+        }
+
+        System.out.println("    -> cleaning up");
+        store = openFileStore(directory.getAbsolutePath(), false);
+        try {
+            for (File file : store.cleanup()) {
+                if (!file.exists() || file.delete()) {
+                    System.out.println("    -> removed old file " + file.getName());
+                } else {
+                    System.out.println("    -> failed to remove old file " + file.getName());
+                }
+            }
+
+            String head;
+            File journal = new File(directory, "journal.log");
+            JournalReader journalReader = new JournalReader(journal);
+            try {
+                head = journalReader.iterator().next() + " root " + System.currentTimeMillis() + "\n";
+            } finally {
+                journalReader.close();
+            }
+
+            RandomAccessFile journalFile = new RandomAccessFile(journal, "rw");
+            try {
+                System.out.println("    -> writing new " + journal.getName() + ": " + head);
+                journalFile.setLength(0);
+                journalFile.writeBytes(head);
+                journalFile.getChannel().force(false);
+            } finally {
+                journalFile.close();
+            }
+        } finally {
+            store.close();
+        }
+    }
+
+    static void diff(File store, File out, boolean listOnly, String interval, boolean incremental, String path, boolean ignoreSNFEs) throws IOException {
+        if (listOnly) {
+            listRevs(store, out);
+        } else {
+            diff(store, interval, incremental, out, path, ignoreSNFEs);
+        }
+    }
+
+    private static FileStore bootstrapFileStore(String path, Closer closer) throws IOException {
+        return closer.register(bootstrapFileStore(path));
+    }
+
+    private static FileStore bootstrapFileStore(String path) throws IOException {
+        return FileStore.builder(new File(path)).build();
+    }
+
+    private static void listRevs(File store, File out) throws IOException {
+        System.out.println("Store " + store);
+        System.out.println("Writing revisions to " + out);
+        List<String> revs = readRevisions(store);
+        if (revs.isEmpty()) {
+            System.out.println("No revisions found.");
+            return;
+        }
+        PrintWriter pw = new PrintWriter(out);
+        try {
+            for (String r : revs) {
+                pw.println(r);
+            }
+        } finally {
+            pw.close();
+        }
+    }
+
+    private static void diff(File dir, String interval, boolean incremental, File out, String filter, boolean ignoreSNFEs) throws IOException {
+        System.out.println("Store " + dir);
+        System.out.println("Writing diff to " + out);
+        String[] tokens = interval.trim().split("\\.\\.");
+        if (tokens.length != 2) {
+            System.out.println("Error parsing revision interval '" + interval
+                    + "'.");
+            return;
+        }
+        ReadOnlyStore store = FileStore.builder(dir).withBlobStore(newBasicReadOnlyBlobStore()).buildReadOnly();
+        RecordId idL = null;
+        RecordId idR = null;
+        try {
+            if (tokens[0].equalsIgnoreCase("head")) {
+                idL = store.getHead().getRecordId();
+            } else {
+                idL = fromString(store.getTracker(), tokens[0]);
+            }
+            if (tokens[1].equalsIgnoreCase("head")) {
+                idR = store.getHead().getRecordId();
+            } else {
+                idR = fromString(store.getTracker(), tokens[1]);
+            }
+        } catch (IllegalArgumentException ex) {
+            System.out.println("Error parsing revision interval '" + interval + "': " + ex.getMessage());
+            ex.printStackTrace();
+            return;
+        }
+
+        long start = System.currentTimeMillis();
+        PrintWriter pw = new PrintWriter(out);
+        try {
+            if (incremental) {
+                List<String> revs = readRevisions(dir);
+                System.out.println("Generating diff between " + idL + " and " + idR + " incrementally. Found " + revs.size() + " revisions.");
+
+                int s = revs.indexOf(idL.toString10());
+                int e = revs.indexOf(idR.toString10());
+                if (s == -1 || e == -1) {
+                    System.out.println("Unable to match input revisions with FileStore.");
+                    return;
+                }
+                List<String> revDiffs = revs.subList(Math.min(s, e), Math.max(s, e) + 1);
+                if (s > e) {
+                    // reverse list
+                    revDiffs = reverse(revDiffs);
+                }
+                if (revDiffs.size() < 2) {
+                    System.out.println("Nothing to diff: " + revDiffs);
+                    return;
+                }
+                Iterator<String> revDiffsIt = revDiffs.iterator();
+                RecordId idLt = fromString(store.getTracker(), revDiffsIt.next());
+                while (revDiffsIt.hasNext()) {
+                    RecordId idRt = fromString(store.getTracker(), revDiffsIt.next());
+                    boolean good = diff(store, idLt, idRt, filter, pw);
+                    idLt = idRt;
+                    if (!good && !ignoreSNFEs) {
+                        break;
+                    }
+                }
+            } else {
+                System.out.println("Generating diff between " + idL + " and " + idR);
+                diff(store, idL, idR, filter, pw);
+            }
+        } finally {
+            pw.close();
+        }
+        long dur = System.currentTimeMillis() - start;
+        System.out.println("Finished in " + dur + " ms.");
+    }
+
+    private static boolean diff(ReadOnlyStore store, RecordId idL, RecordId idR, String filter, PrintWriter pw) throws IOException {
+        pw.println("rev " + idL + ".." + idR);
+        try {
+            NodeState before = new SegmentNodeState(idL).getChildNode("root");
+            NodeState after = new SegmentNodeState(idR).getChildNode("root");
+            for (String name : elements(filter)) {
+                before = before.getChildNode(name);
+                after = after.getChildNode(name);
+            }
+            after.compareAgainstBaseState(before, new PrintingDiff(pw, filter));
+            return true;
+        } catch (SegmentNotFoundException ex) {
+            System.out.println(ex.getMessage());
+            pw.println("#SNFE " + ex.getSegmentId());
+            return false;
         }
     }
 
@@ -225,7 +463,7 @@ class SegmentUtils {
             if (hasrefs) {
                 System.out.println("SegmentNodeState references to " + f);
                 List<String> paths = new ArrayList<String>();
-                NodeStoreTree.filterNodeStates(uuids, paths, store.getHead(),
+                filterNodeStates(uuids, paths, store.getHead(),
                         "/");
                 for (String p : paths) {
                     System.out.println("  " + p);
@@ -299,6 +537,76 @@ class SegmentUtils {
                     System.out.println(JsopBuilder.prettyPrint(JsopDiff
                             .diffToJsop(node1, node2)));
                 }
+            }
+        }
+    }
+
+    private static String displayString(String value) {
+        if (MAX_CHAR_DISPLAY > 0 && value.length() > MAX_CHAR_DISPLAY) {
+            value = value.substring(0, MAX_CHAR_DISPLAY) + "... ("
+                    + value.length() + " chars)";
+        }
+        String escaped = builder().setSafeRange(' ', '~')
+                .addEscape('"', "\\\"").addEscape('\\', "\\\\").build()
+                .escape(value);
+        return '"' + escaped + '"';
+    }
+
+    private static void filterNodeStates(Set<UUID> uuids, List<String> paths, SegmentNodeState state, String path) {
+        Set<String> localPaths = newTreeSet();
+        for (PropertyState ps : state.getProperties()) {
+            if (ps instanceof SegmentPropertyState) {
+                SegmentPropertyState sps = (SegmentPropertyState) ps;
+                RecordId recordId = sps.getRecordId();
+                UUID id = recordId.getSegmentId().asUUID();
+                if (uuids.contains(id)) {
+                    if (ps.getType().tag() == STRING) {
+                        String val = "";
+                        if (ps.count() > 0) {
+                            // only shows the first value, do we need more?
+                            val = displayString(ps.getValue(Type.STRING, 0));
+                        }
+                        localPaths.add(path + ps.getName() + " = " + val
+                                + " [SegmentPropertyState<" + ps.getType()
+                                + ">@" + recordId + "]");
+                    } else {
+                        localPaths.add(path + ps + " [SegmentPropertyState<"
+                                + ps.getType() + ">@" + recordId + "]");
+                    }
+
+                }
+                if (ps.getType().tag() == BINARY) {
+                    // look for extra segment references
+                    for (int i = 0; i < ps.count(); i++) {
+                        Blob b = ps.getValue(Type.BINARY, i);
+                        for (SegmentId sbid : SegmentBlob.getBulkSegmentIds(b)) {
+                            UUID bid = sbid.asUUID();
+                            if (!bid.equals(id) && uuids.contains(bid)) {
+                                localPaths.add(path + ps
+                                        + " [SegmentPropertyState<"
+                                        + ps.getType() + ">@" + recordId + "]");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        RecordId stateId = state.getRecordId();
+        if (uuids.contains(stateId.getSegmentId().asUUID())) {
+            localPaths.add(path + " [SegmentNodeState@" + stateId + "]");
+        }
+
+        RecordId templateId = getTemplateId(state);
+        if (uuids.contains(templateId.getSegmentId().asUUID())) {
+            localPaths.add(path + "[Template@" + templateId + "]");
+        }
+        paths.addAll(localPaths);
+        for (ChildNodeEntry ce : state.getChildNodeEntries()) {
+            NodeState c = ce.getNodeState();
+            if (c instanceof SegmentNodeState) {
+                filterNodeStates(uuids, paths, (SegmentNodeState) c,
+                        path + ce.getName() + "/");
             }
         }
     }

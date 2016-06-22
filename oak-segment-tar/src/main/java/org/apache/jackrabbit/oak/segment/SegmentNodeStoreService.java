@@ -29,6 +29,7 @@ import static org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions.GAIN
 import static org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions.MEMORY_THRESHOLD_DEFAULT;
 import static org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions.PAUSE_DEFAULT;
 import static org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions.RETRY_COUNT_DEFAULT;
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 import static org.apache.jackrabbit.oak.spi.blob.osgi.SplitBlobStoreService.ONLY_STANDALONE_TARGET;
 import static org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardUtils.registerMBean;
 import static org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardUtils.scheduleWithFixedDelay;
@@ -69,7 +70,7 @@ import org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions;
 import org.apache.jackrabbit.oak.segment.compaction.SegmentRevisionGC;
 import org.apache.jackrabbit.oak.segment.compaction.SegmentRevisionGCMBean;
 import org.apache.jackrabbit.oak.segment.file.FileStore;
-import org.apache.jackrabbit.oak.segment.file.FileStore.Builder;
+import org.apache.jackrabbit.oak.segment.file.FileStoreBuilder;
 import org.apache.jackrabbit.oak.segment.file.FileStoreGCMonitor;
 import org.apache.jackrabbit.oak.segment.file.FileStoreStatsMBean;
 import org.apache.jackrabbit.oak.segment.file.GCMonitorMBean;
@@ -333,7 +334,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
         SegmentGCOptions gcOptions = newGCOptions();
 
         // Build the FileStore
-        Builder builder = FileStore.builder(getDirectory())
+        FileStoreBuilder builder = fileStoreBuilder(getDirectory())
                 .withCacheSize(getCacheSize())
                 .withMaxFileSize(getMaxFileSize())
                 .withMemoryMapping(getMode().equals("64"))
@@ -360,9 +361,8 @@ public class SegmentNodeStoreService extends ProxyNodeStore
 
         // Expose stats about the segment cache
 
-        CacheStats segmentCacheStats = store.getTracker().getSegmentCacheStats();
-
-        segmentCacheMBean = registerMBean(
+        CacheStats segmentCacheStats = store.getSegmentCacheStats();
+         segmentCacheMBean = registerMBean(
                 whiteboard,
                 CacheStatsMBean.class,
                 segmentCacheStats,
@@ -372,16 +372,13 @@ public class SegmentNodeStoreService extends ProxyNodeStore
 
         // Expose stats about the string cache, if available
 
-        CacheStats stringCacheStats = store.getTracker().getStringCacheStats();
-
-        if (stringCacheStats != null) {
-            stringCacheMBean = registerMBean(
-                    whiteboard,
-                    CacheStatsMBean.class,
-                    stringCacheStats,CacheStats.TYPE,
-                    stringCacheStats.getName()
-            );
-        }
+        CacheStats stringCacheStats = store.getStringCacheStats();
+        stringCacheMBean = registerMBean(
+                whiteboard,
+                CacheStatsMBean.class,
+                stringCacheStats,CacheStats.TYPE,
+                stringCacheStats.getName()
+        );
 
         // Listen for Executor services on the whiteboard
 
@@ -463,7 +460,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
 
         OsgiWhiteboard whiteboard = new OsgiWhiteboard(context.getBundleContext());
 
-        segmentNodeStore = SegmentNodeStore.builder(store).build();
+        segmentNodeStore = SegmentNodeStoreBuilders.builder(store).build();
 
         observerTracker = new ObserverTracker(segmentNodeStore);
         observerTracker.start(context.getBundleContext());

@@ -29,14 +29,14 @@ import static org.apache.jackrabbit.oak.api.Type.STRING;
 import static org.apache.jackrabbit.oak.api.Type.STRINGS;
 import static org.apache.jackrabbit.oak.plugins.memory.EmptyNodeState.EMPTY_NODE;
 import static org.apache.jackrabbit.oak.segment.ListRecord.LEVEL_SIZE;
-import static org.apache.jackrabbit.oak.segment.Segment.readString;
-import static org.apache.jackrabbit.oak.segment.SegmentVersion.LATEST_VERSION;
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.io.ByteArrayInputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Arrays;
@@ -58,6 +58,7 @@ import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -65,13 +66,13 @@ import org.junit.rules.TemporaryFolder;
 
 public class RecordTest {
     @Rule
-    public TemporaryFolder folder = new TemporaryFolder();
+    public TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
     private static final String HELLO_WORLD = "Hello, World!";
 
     private final byte[] bytes = HELLO_WORLD.getBytes(Charsets.UTF_8);
 
-    private SegmentStore store;
+    private FileStore store;
 
     private SegmentWriter writer;
 
@@ -79,8 +80,13 @@ public class RecordTest {
 
     @Before
     public void setup() throws IOException {
-        store = FileStore.builder(folder.getRoot()).build();
-        writer = store.getTracker().getWriter();
+        store = fileStoreBuilder(folder.getRoot()).build();
+        writer = store.getWriter();
+    }
+
+    @After
+    public void tearDown() {
+        store.close();
     }
 
     @Test
@@ -144,10 +150,9 @@ public class RecordTest {
 
     @Test
     public void testListWithLotsOfReferences() throws IOException { // OAK-1184
-        SegmentTracker factory = store.getTracker();
         List<RecordId> list = newArrayList();
         for (int i = 0; i < 1000; i++) {
-            list.add(new RecordId(factory.newBulkSegmentId(), 0));
+            list.add(new RecordId(store.newBulkSegmentId(), 0));
         }
         writer.writeList(list);
     }
@@ -204,10 +209,10 @@ public class RecordTest {
 
         Segment segment = large.getSegmentId().getSegment();
 
-        assertEquals("", readString(empty));
-        assertEquals(" ", readString(space));
-        assertEquals("Hello, World!", readString(hello));
-        assertEquals(builder.toString(), readString(large));
+        assertEquals("", store.getReader().readString(empty));
+        assertEquals(" ", store.getReader().readString(space));
+        assertEquals("Hello, World!", store.getReader().readString(hello));
+        assertEquals(builder.toString(), store.getReader().readString(large));
     }
 
     @Test
@@ -390,7 +395,7 @@ public class RecordTest {
         byte[] data = new byte[Segment.MEDIUM_LIMIT + 1];
         random.nextBytes(data);
 
-        SegmentNodeStore extStore = SegmentNodeStore.builder(new MemoryStore()).build();
+        SegmentNodeStore extStore = SegmentNodeStoreBuilders.builder(new MemoryStore()).build();
         NodeBuilder extRootBuilder = extStore.getRoot().builder();
         Blob extBlob = extRootBuilder.createBlob(new ByteArrayInputStream(data));
         extRootBuilder.setProperty("binary", extBlob, BINARY);
@@ -429,7 +434,8 @@ public class RecordTest {
     @Test
     public void testCancel() throws IOException {
         NodeBuilder builder = EMPTY_NODE.builder();
-        SegmentBufferWriter bufferWriter = new SegmentBufferWriter(store, LATEST_VERSION, "test");
+        SegmentBufferWriter bufferWriter = new SegmentBufferWriter(store, store.getTracker(),
+                store.getReader(), "test", 0);
         NodeState state = writer.writeNode(builder.getNodeState(), bufferWriter, Suppliers.ofInstance(true));
         assertNull(state);
     }

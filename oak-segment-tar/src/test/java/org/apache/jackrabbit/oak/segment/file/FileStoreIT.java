@@ -22,6 +22,7 @@ import static com.google.common.collect.Lists.newArrayList;
 import static com.google.common.collect.Sets.newTreeSet;
 import static org.apache.jackrabbit.oak.commons.FixturesHelper.Fixture.SEGMENT_MK;
 import static org.apache.jackrabbit.oak.commons.FixturesHelper.getFixtures;
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -44,7 +45,6 @@ import org.apache.jackrabbit.oak.segment.Segment;
 import org.apache.jackrabbit.oak.segment.SegmentNodeBuilder;
 import org.apache.jackrabbit.oak.segment.SegmentNodeState;
 import org.apache.jackrabbit.oak.segment.SegmentWriter;
-import org.apache.jackrabbit.oak.segment.file.FileStore;
 import org.apache.jackrabbit.oak.segment.file.FileStore.ReadOnlyStore;
 import org.junit.BeforeClass;
 import org.junit.Rule;
@@ -54,7 +54,7 @@ import org.junit.rules.TemporaryFolder;
 public class FileStoreIT {
 
     @Rule
-    public TemporaryFolder folder = new TemporaryFolder();
+    public TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
     private File getFileStoreFolder() {
         return folder.getRoot();
@@ -76,33 +76,33 @@ public class FileStoreIT {
     }
 
     public void testRestartAndGC(boolean memoryMapping) throws IOException {
-        FileStore store = FileStore.builder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(memoryMapping).build();
+        FileStore store = fileStoreBuilder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(memoryMapping).build();
         store.close();
 
-        store = FileStore.builder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(memoryMapping).build();
+        store = fileStoreBuilder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(memoryMapping).build();
         SegmentNodeState base = store.getHead();
         SegmentNodeBuilder builder = base.builder();
         byte[] data = new byte[10 * 1024 * 1024];
         new Random().nextBytes(data);
         Blob blob = builder.createBlob(new ByteArrayInputStream(data));
         builder.setProperty("foo", blob);
-        store.setHead(base, builder.getNodeState());
+        store.getRevisions().setHead(base.getRecordId(), builder.getNodeState().getRecordId());
         store.flush();
-        store.setHead(store.getHead(), base);
+        store.getRevisions().setHead(store.getRevisions().getHead(), base.getRecordId());
         store.close();
 
-        store = FileStore.builder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(memoryMapping).build();
+        store = fileStoreBuilder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(memoryMapping).build();
         store.gc();
         store.flush();
         store.close();
 
-        store = FileStore.builder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(memoryMapping).build();
+        store = fileStoreBuilder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(memoryMapping).build();
         store.close();
     }
 
     @Test
     public void testRecovery() throws IOException {
-        FileStore store = FileStore.builder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(false).build();
+        FileStore store = fileStoreBuilder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(false).build();
         store.flush();
 
         RandomAccessFile data0 = new RandomAccessFile(new File(getFileStoreFolder(), "data00000a.tar"), "r");
@@ -111,7 +111,7 @@ public class FileStoreIT {
         SegmentNodeState base = store.getHead();
         SegmentNodeBuilder builder = base.builder();
         builder.setProperty("step", "a");
-        store.setHead(base, builder.getNodeState());
+        store.getRevisions().setHead(base.getRecordId(), builder.getNodeState().getRecordId());
         store.flush();
         long pos1 = data0.length();
         data0.close();
@@ -119,10 +119,10 @@ public class FileStoreIT {
         base = store.getHead();
         builder = base.builder();
         builder.setProperty("step", "b");
-        store.setHead(base, builder.getNodeState());
+        store.getRevisions().setHead(base.getRecordId(), builder.getNodeState().getRecordId());
         store.close();
 
-        store = FileStore.builder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(false).build();
+        store = fileStoreBuilder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(false).build();
         assertEquals("b", store.getHead().getString("step"));
         store.close();
 
@@ -131,7 +131,7 @@ public class FileStoreIT {
         file.setLength(pos1);
         file.close();
 
-        store = FileStore.builder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(false).build();
+        store = fileStoreBuilder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(false).build();
         assertEquals("a", store.getHead().getString("step"));
         store.close();
 
@@ -140,7 +140,7 @@ public class FileStoreIT {
         file.setLength(pos0);
         file.close();
 
-        store = FileStore.builder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(false).build();
+        store = fileStoreBuilder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(false).build();
         assertFalse(store.getHead().hasProperty("step"));
         store.close();
     }
@@ -173,8 +173,8 @@ public class FileStoreIT {
     @Test  // See OAK-2049
     public void segmentOverflow() throws IOException {
         for (int n = 1; n < 255; n++) {  // 255 = ListRecord.LEVEL_SIZE
-            FileStore store = FileStore.builder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(false).build();
-            SegmentWriter writer = store.getTracker().getWriter();
+            FileStore store = fileStoreBuilder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(false).build();
+            SegmentWriter writer = store.getWriter();
             // writer.length == 32  (from the root node)
 
             // adding 15 strings with 16516 bytes each
@@ -205,23 +205,46 @@ public class FileStoreIT {
 
     @Test
     public void nonBlockingROStore() throws IOException {
-        FileStore store = FileStore.builder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(false).build();
+        FileStore store = fileStoreBuilder(getFileStoreFolder()).withMaxFileSize(1).withMemoryMapping(false).build();
         store.flush(); // first 1kB
         SegmentNodeState base = store.getHead();
         SegmentNodeBuilder builder = base.builder();
         builder.setProperty("step", "a");
-        store.setHead(base, builder.getNodeState());
+        store.getRevisions().setHead(base.getRecordId(), builder.getNodeState().getRecordId());
         store.flush(); // second 1kB
 
         ReadOnlyStore ro = null;
         try {
-            ro = FileStore.builder(getFileStoreFolder()).buildReadOnly();
-            assertEquals(store.getHead(), ro.getHead());
+            ro = fileStoreBuilder(getFileStoreFolder()).buildReadOnly();
+            assertEquals(store.getRevisions().getHead(), ro.getRevisions().getHead());
         } finally {
             if (ro != null) {
                 ro.close();
             }
             store.close();
+        }
+    }
+
+    @Test
+    public void setRevisionTest() throws IOException {
+        try (FileStore store = fileStoreBuilder(getFileStoreFolder()).build()) {
+            RecordId id1 = store.getRevisions().getHead();
+            SegmentNodeState base = store.getHead();
+            SegmentNodeBuilder builder = base.builder();
+            builder.setProperty("step", "a");
+            store.getRevisions().setHead(base.getRecordId(), builder.getNodeState().getRecordId());
+            RecordId id2 = store.getRevisions().getHead();
+            store.flush();
+
+            try (ReadOnlyStore roStore = fileStoreBuilder(getFileStoreFolder()).buildReadOnly()) {
+                assertEquals(id2, roStore.getRevisions().getHead());
+
+                roStore.setRevision(id1.toString());
+                assertEquals(id1, roStore.getRevisions().getHead());
+
+                roStore.setRevision(id2.toString());
+                assertEquals(id2, roStore.getRevisions().getHead());
+            }
         }
     }
 

@@ -17,26 +17,37 @@
 
 package org.apache.jackrabbit.oak.run;
 
+import static com.google.common.collect.Lists.newArrayList;
+import static com.google.common.collect.Lists.reverse;
 import static com.google.common.collect.Sets.newHashSet;
 import static com.google.common.collect.Sets.newTreeSet;
 import static com.google.common.escape.Escapers.builder;
 import static org.apache.commons.io.FileUtils.byteCountToDisplaySize;
+import static org.apache.jackrabbit.oak.commons.PathUtils.elements;
 import static org.apache.jackrabbit.oak.plugins.segment.FileStoreHelper.isValidFileStoreOrFail;
 import static org.apache.jackrabbit.oak.plugins.segment.FileStoreHelper.newBasicReadOnlyBlobStore;
+import static org.apache.jackrabbit.oak.segment.RecordId.fromString;
 import static org.apache.jackrabbit.oak.segment.RecordType.NODE;
 import static org.apache.jackrabbit.oak.segment.SegmentGraph.writeGCGraph;
 import static org.apache.jackrabbit.oak.segment.SegmentGraph.writeSegmentGraph;
 import static org.apache.jackrabbit.oak.segment.SegmentNodeStateHelper.getTemplateId;
+import static org.apache.jackrabbit.oak.segment.SegmentVersion.LATEST_VERSION;
+import static org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions.defaultGCOptions;
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
+import static org.apache.jackrabbit.oak.segment.file.tooling.ConsistencyChecker.checkConsistency;
 import static org.slf4j.LoggerFactory.getLogger;
 
-import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.PrintWriter;
+import java.io.RandomAccessFile;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -52,40 +63,59 @@ import ch.qos.logback.classic.Logger;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Queues;
 import com.google.common.io.Closer;
+import org.apache.commons.io.FileUtils;
 import org.apache.jackrabbit.oak.api.Blob;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.backup.FileStoreBackup;
 import org.apache.jackrabbit.oak.backup.FileStoreRestore;
+import org.apache.jackrabbit.oak.commons.IOUtils;
 import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.commons.json.JsopBuilder;
 import org.apache.jackrabbit.oak.json.JsopDiff;
+import org.apache.jackrabbit.oak.plugins.blob.BlobReferenceRetriever;
 import org.apache.jackrabbit.oak.segment.RecordId;
 import org.apache.jackrabbit.oak.segment.RecordUsageAnalyser;
 import org.apache.jackrabbit.oak.segment.Segment;
 import org.apache.jackrabbit.oak.segment.SegmentBlob;
+import org.apache.jackrabbit.oak.segment.SegmentBlobReferenceRetriever;
 import org.apache.jackrabbit.oak.segment.SegmentId;
 import org.apache.jackrabbit.oak.segment.SegmentNodeState;
-import org.apache.jackrabbit.oak.segment.SegmentNodeStore;
+import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
+import org.apache.jackrabbit.oak.segment.SegmentNotFoundException;
 import org.apache.jackrabbit.oak.segment.SegmentPropertyState;
+import org.apache.jackrabbit.oak.segment.SegmentReader;
 import org.apache.jackrabbit.oak.segment.SegmentTracker;
+import org.apache.jackrabbit.oak.segment.SegmentVersion;
 import org.apache.jackrabbit.oak.segment.file.FileStore;
+import org.apache.jackrabbit.oak.segment.file.FileStoreBuilder;
 import org.apache.jackrabbit.oak.segment.file.FileStore.ReadOnlyStore;
+import org.apache.jackrabbit.oak.segment.file.JournalReader;
+import org.apache.jackrabbit.oak.segment.file.tooling.RevisionHistory;
+import org.apache.jackrabbit.oak.segment.file.tooling.RevisionHistory.HistoryElement;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 import org.apache.jackrabbit.oak.spi.state.ChildNodeEntry;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 
-class SegmentTarUtils {
+final class SegmentTarUtils {
 
     private static final boolean TAR_STORAGE_MEMORY_MAPPED = Boolean.getBoolean("tar.memoryMapped");
 
     private static final int TAR_SEGMENT_CACHE_SIZE = Integer.getInteger("cache", 256);
 
-    private final static int MAX_CHAR_DISPLAY = Integer.getInteger("max.char.display", 60);
+    private static final int MAX_CHAR_DISPLAY = Integer.getInteger("max.char.display", 60);
 
     private SegmentTarUtils() {
         // Prevent instantiation
+    }
+
+    static NodeStore bootstrapNodeStore(String path, Closer closer) throws IOException {
+        return SegmentNodeStoreBuilders.builder(bootstrapFileStore(path, closer)).build();
+    }
+
+    static BlobReferenceRetriever newBlobReferenceRetriever(String path, Closer closer) throws IOException {
+        return new SegmentBlobReferenceRetriever(closer.register(openFileStore(path, false)));
     }
 
     static void backup(File source, File target) throws IOException {
@@ -97,9 +127,8 @@ class SegmentTarUtils {
             } else {
                 fs = openReadOnlyFileStore(source);
             }
-            closer.register(asCloseable(fs));
-            NodeStore store = SegmentNodeStore.builder(fs).build();
-            FileStoreBackup.backup(store, target);
+            closer.register(fs);
+            FileStoreBackup.backup(fs.getReader(), fs.getRevisions(), target);
         } catch (Throwable e) {
             throw closer.rethrow(e);
         } finally {
@@ -140,6 +169,221 @@ class SegmentTarUtils {
         }
     }
 
+    static void history(File directory, File journal, String path, int depth) throws IOException {
+        Iterator<HistoryElement> history = new RevisionHistory(directory).getHistory(journal, path);
+        while (history.hasNext()) {
+            RevisionHistory.HistoryElement historyElement = history.next();
+            System.out.println(historyElement.toString(depth));
+        }
+    }
+
+    static void check(File dir, String journalFileName, boolean fullTraversal, long debugLevel, long binLen) throws IOException {
+        checkConsistency(dir, journalFileName, fullTraversal, debugLevel, binLen);
+    }
+
+    static void compact(File directory, boolean force) throws IOException {
+        FileStore store = newFileStoreBuilder(directory.getAbsolutePath(),
+                force).withGCOptions(defaultGCOptions().setOffline()).build();
+        try {
+            System.out.println("Compacting " + directory);
+            System.out.println("    before " + Arrays.toString(directory.list()));
+            long sizeBefore = FileUtils.sizeOfDirectory(directory);
+            System.out.println("    size "
+                    + IOUtils.humanReadableByteCount(sizeBefore) + " (" + sizeBefore
+                    + " bytes)");
+            System.out.println("    -> compacting");
+            store.compact();
+        } finally {
+            store.close();
+        }
+
+        System.out.println("    -> cleaning up");
+        store = newFileStoreBuilder(directory.getAbsolutePath(), force)
+                .withGCOptions(defaultGCOptions().setOffline()).build();
+        try {
+            for (File file : store.cleanup()) {
+                if (!file.exists() || file.delete()) {
+                    System.out.println("    -> removed old file " + file.getName());
+                } else {
+                    System.out.println("    -> failed to remove old file " + file.getName());
+                }
+            }
+
+            String head;
+            File journal = new File(directory, "journal.log");
+            JournalReader journalReader = new JournalReader(journal);
+            try {
+                head = journalReader.next() + " root " + System.currentTimeMillis() + "\n";
+            } finally {
+                journalReader.close();
+            }
+
+            RandomAccessFile journalFile = new RandomAccessFile(journal, "rw");
+            try {
+                System.out.println("    -> writing new " + journal.getName() + ": " + head);
+                journalFile.setLength(0);
+                journalFile.writeBytes(head);
+                journalFile.getChannel().force(false);
+            } finally {
+                journalFile.close();
+            }
+        } finally {
+            store.close();
+        }
+    }
+
+    static void diff(File store, File out, boolean listOnly, String interval, boolean incremental, String path, boolean ignoreSNFEs) throws IOException {
+        if (listOnly) {
+            listRevs(store, out);
+        } else {
+            diff(store, interval, incremental, out, path, ignoreSNFEs);
+        }
+    }
+
+    private static FileStore bootstrapFileStore(String path, Closer closer) throws IOException {
+        return closer.register(bootstrapFileStore(path));
+    }
+
+    private static FileStore bootstrapFileStore(String path) throws IOException {
+        return fileStoreBuilder(new File(path)).build();
+    }
+
+    private static void listRevs(File store, File out) throws IOException {
+        System.out.println("Store " + store);
+        System.out.println("Writing revisions to " + out);
+        List<String> revs = readRevisions(store);
+        if (revs.isEmpty()) {
+            System.out.println("No revisions found.");
+            return;
+        }
+        PrintWriter pw = new PrintWriter(out);
+        try {
+            for (String r : revs) {
+                pw.println(r);
+            }
+        } finally {
+            pw.close();
+        }
+    }
+
+    private static List<String> readRevisions(File store) {
+        File journal = new File(store, "journal.log");
+        if (!journal.exists()) {
+            return newArrayList();
+        }
+
+        List<String> revs = newArrayList();
+        JournalReader journalReader = null;
+        try {
+            journalReader = new JournalReader(journal);
+            try {
+                revs = newArrayList(journalReader);
+            } finally {
+                journalReader.close();
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        } finally {
+            try {
+                if (journalReader != null) {
+                    journalReader.close();
+                }
+            } catch (IOException e) {
+            }
+        }
+        return revs;
+    }
+
+    private static void diff(File dir, String interval, boolean incremental, File out, String filter, boolean ignoreSNFEs) throws IOException {
+        System.out.println("Store " + dir);
+        System.out.println("Writing diff to " + out);
+        String[] tokens = interval.trim().split("\\.\\.");
+        if (tokens.length != 2) {
+            System.out.println("Error parsing revision interval '" + interval
+                    + "'.");
+            return;
+        }
+        ReadOnlyStore store = fileStoreBuilder(dir).withBlobStore(newBasicReadOnlyBlobStore()).buildReadOnly();
+        RecordId idL = null;
+        RecordId idR = null;
+        try {
+            if (tokens[0].equalsIgnoreCase("head")) {
+                idL = store.getRevisions().getHead();
+            } else {
+                idL = fromString(store, tokens[0]);
+            }
+            if (tokens[1].equalsIgnoreCase("head")) {
+                idR = store.getRevisions().getHead();
+            } else {
+                idR = fromString(store, tokens[1]);
+            }
+        } catch (IllegalArgumentException ex) {
+            System.out.println("Error parsing revision interval '" + interval + "': " + ex.getMessage());
+            ex.printStackTrace();
+            return;
+        }
+
+        long start = System.currentTimeMillis();
+        PrintWriter pw = new PrintWriter(out);
+        try {
+            if (incremental) {
+                List<String> revs = readRevisions(dir);
+                System.out.println("Generating diff between " + idL + " and " + idR + " incrementally. Found " + revs.size() + " revisions.");
+
+                int s = revs.indexOf(idL.toString10());
+                int e = revs.indexOf(idR.toString10());
+                if (s == -1 || e == -1) {
+                    System.out.println("Unable to match input revisions with FileStore.");
+                    return;
+                }
+                List<String> revDiffs = revs.subList(Math.min(s, e), Math.max(s, e) + 1);
+                if (s > e) {
+                    // reverse list
+                    revDiffs = reverse(revDiffs);
+                }
+                if (revDiffs.size() < 2) {
+                    System.out.println("Nothing to diff: " + revDiffs);
+                    return;
+                }
+                Iterator<String> revDiffsIt = revDiffs.iterator();
+                RecordId idLt = fromString(store, revDiffsIt.next());
+                while (revDiffsIt.hasNext()) {
+                    RecordId idRt = fromString(store, revDiffsIt.next());
+                    boolean good = diff(store, idLt, idRt, filter, pw);
+                    idLt = idRt;
+                    if (!good && !ignoreSNFEs) {
+                        break;
+                    }
+                }
+            } else {
+                System.out.println("Generating diff between " + idL + " and " + idR);
+                diff(store, idL, idR, filter, pw);
+            }
+        } finally {
+            pw.close();
+        }
+        long dur = System.currentTimeMillis() - start;
+        System.out.println("Finished in " + dur + " ms.");
+    }
+
+    private static boolean diff(ReadOnlyStore store, RecordId idL, RecordId idR, String filter, PrintWriter pw) throws IOException {
+        pw.println("rev " + idL + ".." + idR);
+        try {
+            NodeState before = store.getReader().readNode(idL).getChildNode("root");
+            NodeState after = store.getReader().readNode(idR).getChildNode("root");
+            for (String name : elements(filter)) {
+                before = before.getChildNode(name);
+                after = after.getChildNode(name);
+            }
+            after.compareAgainstBaseState(before, new PrintingDiff(pw, filter));
+            return true;
+        } catch (SegmentNotFoundException ex) {
+            System.out.println(ex.getMessage());
+            pw.println("#SNFE " + ex.getSegmentId());
+            return false;
+        }
+    }
+
     private static void debugFileStore(FileStore store) {
         Map<SegmentId, List<SegmentId>> idmap = Maps.newHashMap();
         int dataCount = 0;
@@ -148,7 +392,7 @@ class SegmentTarUtils {
         long bulkSize = 0;
 
         ((Logger) getLogger(SegmentTracker.class)).setLevel(Level.OFF);
-        RecordUsageAnalyser analyser = new RecordUsageAnalyser();
+        RecordUsageAnalyser analyser = new RecordUsageAnalyser(store.getReader());
 
         for (SegmentId id : store.getSegmentIds()) {
             if (id.isDataSegmentId()) {
@@ -174,7 +418,7 @@ class SegmentTarUtils {
 
         Set<SegmentId> garbage = newHashSet(idmap.keySet());
         Queue<SegmentId> queue = Queues.newArrayDeque();
-        queue.add(store.getHead().getRecordId().getSegmentId());
+        queue.add(store.getRevisions().getHead().getSegmentId());
         while (!queue.isEmpty()) {
             SegmentId id = queue.remove();
             if (garbage.remove(id)) {
@@ -241,8 +485,7 @@ class SegmentTarUtils {
             if (hasrefs) {
                 System.out.println("SegmentNodeState references to " + f);
                 List<String> paths = new ArrayList<String>();
-                filterNodeStates(uuids, paths, store.getHead(),
-                        "/");
+                filterNodeStates(uuids, paths, store.getHead(), "/");
                 for (String p : paths) {
                     System.out.println("  " + p);
                 }
@@ -335,6 +578,7 @@ class SegmentTarUtils {
     }
 
     private static void debugSegment(FileStore store, String[] args) {
+        SegmentReader reader = store.getReader();
         Pattern pattern = Pattern
                 .compile("([0-9a-f-]+)|(([0-9a-f-]+:[0-9a-f]+)(-([0-9a-f-]+:[0-9a-f]+))?)?(/.*)?");
         for (int i = 1; i < args.length; i++) {
@@ -343,18 +587,18 @@ class SegmentTarUtils {
                 System.err.println("Unknown argument: " + args[i]);
             } else if (matcher.group(1) != null) {
                 UUID uuid = UUID.fromString(matcher.group(1));
-                SegmentId id = store.getTracker().getSegmentId(
+                SegmentId id = store.newSegmentId(
                         uuid.getMostSignificantBits(),
                         uuid.getLeastSignificantBits());
                 System.out.println(id.getSegment());
             } else {
-                RecordId id1 = store.getHead().getRecordId();
+                RecordId id1 = store.getRevisions().getHead();
                 RecordId id2 = null;
                 if (matcher.group(2) != null) {
-                    id1 = RecordId.fromString(store.getTracker(),
+                    id1 = fromString(store,
                             matcher.group(3));
                     if (matcher.group(4) != null) {
-                        id2 = RecordId.fromString(store.getTracker(),
+                        id2 = fromString(store,
                                 matcher.group(5));
                     }
                 }
@@ -364,7 +608,7 @@ class SegmentTarUtils {
                 }
 
                 if (id2 == null) {
-                    NodeState node = new SegmentNodeState(id1);
+                    NodeState node = reader.readNode(id1);
                     System.out.println("/ (" + id1 + ") -> " + node);
                     for (String name : PathUtils.elements(path)) {
                         node = node.getChildNode(name);
@@ -376,8 +620,8 @@ class SegmentTarUtils {
                                 + node);
                     }
                 } else {
-                    NodeState node1 = new SegmentNodeState(id1);
-                    NodeState node2 = new SegmentNodeState(id2);
+                    NodeState node1 = reader.readNode(id1);
+                    NodeState node2 = reader.readNode(id2);
                     for (String name : PathUtils.elements(path)) {
                         node1 = node1.getChildNode(name);
                         node2 = node2.getChildNode(name);
@@ -390,7 +634,7 @@ class SegmentTarUtils {
     }
 
     private static FileStore openReadOnlyFileStore(File path, BlobStore blobStore) throws IOException {
-        return FileStore.builder(isValidFileStoreOrFail(path))
+        return fileStoreBuilder(isValidFileStoreOrFail(path))
                 .withCacheSize(TAR_SEGMENT_CACHE_SIZE)
                 .withMemoryMapping(TAR_STORAGE_MEMORY_MAPPED)
                 .withBlobStore(blobStore)
@@ -398,21 +642,47 @@ class SegmentTarUtils {
     }
 
     private static ReadOnlyStore openReadOnlyFileStore(File path) throws IOException {
-        return FileStore.builder(isValidFileStoreOrFail(path))
+        return fileStoreBuilder(isValidFileStoreOrFail(path))
                 .withCacheSize(TAR_SEGMENT_CACHE_SIZE)
                 .withMemoryMapping(TAR_STORAGE_MEMORY_MAPPED)
                 .buildReadOnly();
     }
 
-    private static Closeable asCloseable(final FileStore fs) {
-        return new Closeable() {
+    private static FileStoreBuilder newFileStoreBuilder(String directory, boolean force)
+            throws IOException {
+        return fileStoreBuilder(checkFileStoreVersionOrFail(directory, force))
+                .withCacheSize(TAR_SEGMENT_CACHE_SIZE)
+                .withMemoryMapping(TAR_STORAGE_MEMORY_MAPPED);
+    }
 
-            @Override
-            public void close() throws IOException {
-                fs.close();
+    private static FileStore openFileStore(String directory, boolean force)
+            throws IOException {
+        return newFileStoreBuilder(directory, force).build();
+    }
+
+    private static File checkFileStoreVersionOrFail(String path, boolean force) throws IOException {
+        File directory = new File(path);
+        if (!directory.exists()) {
+            return directory;
+        }
+        FileStore store = openReadOnlyFileStore(directory);
+        try {
+            SegmentVersion segmentVersion = getSegmentVersion(store);
+            if (segmentVersion != LATEST_VERSION) {
+                if (force) {
+                    System.out.printf("Segment version mismatch. Found %s, expected %s. Forcing execution.\n", segmentVersion, LATEST_VERSION);
+                } else {
+                    throw new RuntimeException(String.format("Segment version mismatch. Found %s, expected %s. Aborting.", segmentVersion, LATEST_VERSION));
+                }
             }
+        } finally {
+            store.close();
+        }
+        return directory;
+    }
 
-        };
+    private static SegmentVersion getSegmentVersion(FileStore fileStore) {
+        return fileStore.getRevisions().getHead().getSegment().getSegmentVersion();
     }
 
 }

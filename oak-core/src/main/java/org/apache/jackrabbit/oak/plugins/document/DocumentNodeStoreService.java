@@ -279,7 +279,7 @@ public class DocumentNodeStoreService {
 
     private final Logger log = LoggerFactory.getLogger(this.getClass());
 
-    private ServiceRegistration reg;
+    private ServiceRegistration nodeStoreReg;
     private final List<Registration> registrations = new ArrayList<Registration>();
     private WhiteboardExecutor executor;
 
@@ -301,6 +301,10 @@ public class DocumentNodeStoreService {
     
     @Reference
     private MountInfoProvider mountInfoProvider;
+
+    @Reference(cardinality = ReferenceCardinality.OPTIONAL_UNARY,
+            policy = ReferencePolicy.DYNAMIC)
+    private volatile DocumentNodeStateCache nodeStateCache;
 
     private DocumentMK mk;
     private ObserverTracker observerTracker;
@@ -361,6 +365,12 @@ public class DocumentNodeStoreService {
     private StatisticsProvider statisticsProvider;
 
     private boolean customBlobStore;
+
+    private DocumentNodeStore documentNodeStore;
+
+    private ServiceRegistration blobStoreReg;
+
+    private BlobStore defaultBlobStore;
 
     @Activate
     protected void activate(ComponentContext context, Map<String, ?> config) throws Exception {
@@ -514,6 +524,13 @@ public class DocumentNodeStoreService {
             log.info("Connected to database '{}'", db);
         }
 
+        if (!customBlobStore){
+            defaultBlobStore = mkBuilder.getBlobStore();
+            log.info("Registering the BlobStore with ServiceRegistry");
+            blobStoreReg = context.getBundleContext().registerService(BlobStore.class.getName(),
+                    defaultBlobStore , null);
+        }
+
         //Set wrapping blob store after setting the DB
         if (wrappingCustomBlobStore) {
             ((BlobStoreWrapper) blobStore).setBlobStore(mkBuilder.getBlobStore());
@@ -547,9 +564,9 @@ public class DocumentNodeStoreService {
         registerJournalGC(mk.getNodeStore());
 
         NodeStore store;
-        DocumentNodeStore mns = mk.getNodeStore();
-        store = mns;
-        observerTracker = new ObserverTracker(mns);
+        documentNodeStore = mk.getNodeStore();
+        store = documentNodeStore;
+        observerTracker = new ObserverTracker(documentNodeStore);
 
         observerTracker.start(context.getBundleContext());
 
@@ -578,7 +595,7 @@ public class DocumentNodeStoreService {
         // OAK-2844: in order to allow DocumentDiscoveryLiteService to directly
         // require a service DocumentNodeStore (instead of having to do an 'instanceof')
         // the registration is now done for both NodeStore and DocumentNodeStore here.
-        reg = context.getBundleContext().registerService(
+        nodeStoreReg = context.getBundleContext().registerService(
             new String[]{
                  NodeStore.class.getName(), 
                  DocumentNodeStore.class.getName(), 
@@ -598,6 +615,9 @@ public class DocumentNodeStoreService {
 
     @SuppressWarnings("UnusedDeclaration")
     protected void bindBlobStore(BlobStore blobStore) throws IOException {
+        if (defaultBlobStore == blobStore){
+            return;
+        }
         log.info("Initializing DocumentNodeStore with BlobStore [{}]", blobStore);
         this.blobStore = blobStore;
         registerNodeStoreIfPossible();
@@ -635,6 +655,21 @@ public class DocumentNodeStoreService {
         unregisterNodeStore();
     }
 
+    @SuppressWarnings("UnusedDeclaration")
+    protected void bindNodeStateCache(DocumentNodeStateCache nodeStateCache) throws IOException {
+       if (documentNodeStore != null){
+           log.info("Registered DocumentNodeStateCache [{}] with DocumentNodeStore", nodeStateCache);
+           documentNodeStore.setNodeStateCache(nodeStateCache);
+       }
+    }
+
+    @SuppressWarnings("UnusedDeclaration")
+    protected void unbindNodeStateCache(DocumentNodeStateCache nodeStateCache) {
+        if (documentNodeStore != null){
+            documentNodeStore.setNodeStateCache(DocumentNodeStateCache.NOOP);
+        }
+    }
+
     private void unregisterNodeStore() {
         deactivationTimestamp = System.currentTimeMillis();
 
@@ -643,9 +678,18 @@ public class DocumentNodeStoreService {
         }
         registrations.clear();
 
-        if (reg != null) {
-            reg.unregister();
-            reg = null;
+        if (nodeStoreReg != null) {
+            nodeStoreReg.unregister();
+            nodeStoreReg = null;
+        }
+
+        //If we exposed our BlobStore then unregister it *after*
+        //NodeStore service. This ensures that if any other component
+        //like SecondaryStoreCache depends on this then it remains active
+        //untill DocumentNodeStore get deactivated
+        if (blobStoreReg != null){
+            blobStoreReg.unregister();
+            blobStoreReg = null;
         }
 
         if (mk != null) {

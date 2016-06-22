@@ -19,18 +19,19 @@
 
 package org.apache.jackrabbit.oak.segment.file;
 
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 import static org.junit.Assert.assertEquals;
 import static org.mockito.Matchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 
 import com.google.common.base.Strings;
 import org.apache.jackrabbit.oak.segment.Segment;
 import org.apache.jackrabbit.oak.segment.SegmentBlob;
-import org.apache.jackrabbit.oak.segment.file.FileStore;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 import org.junit.After;
 import org.junit.Before;
@@ -41,7 +42,7 @@ import org.junit.rules.TemporaryFolder;
 public class ExternalBlobReferenceTest {
 
     @Rule
-    public final TemporaryFolder segmentFolder = new TemporaryFolder();
+    public final TemporaryFolder segmentFolder = new TemporaryFolder(new File("target"));
 
     private FileStore fileStore;
 
@@ -50,7 +51,7 @@ public class ExternalBlobReferenceTest {
     @Before
     public void createFileStore() throws Exception {
         blobStore = mock(BlobStore.class);
-        fileStore = FileStore.builder(segmentFolder.getRoot()).withBlobStore(blobStore).build();
+        fileStore = fileStoreBuilder(segmentFolder.getRoot()).withBlobStore(blobStore).build();
     }
 
     @After
@@ -103,7 +104,7 @@ public class ExternalBlobReferenceTest {
         doReturn(blobId).when(blobStore).writeBlob(any(InputStream.class));
         doReturn(blobLength).when(blobStore).getBlobLength(blobId);
 
-        SegmentBlob blob = fileStore.getTracker().getWriter().writeStream(newRandomInputStream(blobLength));
+        SegmentBlob blob = fileStore.getWriter().writeStream(newRandomInputStream(blobLength));
 
         assertEquals(blobLength, blob.length());
     }

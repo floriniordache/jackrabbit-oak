@@ -16,6 +16,8 @@
  */
 package org.apache.jackrabbit.oak.upgrade;
 
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
+
 import java.io.File;
 import java.io.IOException;
 
@@ -26,6 +28,7 @@ import org.apache.jackrabbit.oak.Oak;
 import org.apache.jackrabbit.oak.jcr.Jcr;
 import org.apache.jackrabbit.oak.jcr.repository.RepositoryImpl;
 import org.apache.jackrabbit.oak.segment.SegmentNodeStore;
+import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
 import org.apache.jackrabbit.oak.segment.file.FileStore;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.junit.Before;
@@ -38,8 +41,8 @@ public class IncludeExcludeSidegradeTest extends IncludeExcludeUpgradeTest {
             File directory = getTestDirectory();
             File source = new File(directory, "source");
             source.mkdirs();
-            FileStore fileStore = FileStore.builder(source).build();
-            SegmentNodeStore segmentNodeStore = SegmentNodeStore.builder(fileStore).build();
+            FileStore fileStore = fileStoreBuilder(source).build();
+            SegmentNodeStore segmentNodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
             RepositoryImpl repository = (RepositoryImpl) new Jcr(new Oak(segmentNodeStore)).createRepository();
             Session session = repository.login(CREDENTIALS);
             try {
@@ -58,8 +61,8 @@ public class IncludeExcludeSidegradeTest extends IncludeExcludeUpgradeTest {
 
     @Override
     protected void doUpgradeRepository(File source, NodeStore target) throws RepositoryException, IOException {
-        FileStore fileStore = FileStore.builder(source).build();
-        SegmentNodeStore segmentNodeStore = SegmentNodeStore.builder(fileStore).build();
+        FileStore fileStore = fileStoreBuilder(source).build();
+        SegmentNodeStore segmentNodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
         try {
             final RepositorySidegrade sidegrade = new RepositorySidegrade(segmentNodeStore, target);
             sidegrade.setIncludes(

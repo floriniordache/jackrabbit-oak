@@ -20,28 +20,12 @@ package org.apache.jackrabbit.oak.segment;
 
 import java.io.IOException;
 
-import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
-
-import org.apache.jackrabbit.oak.api.Blob;
-import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 
 /**
  * The backend storage interface used by the segment node store.
  */
 public interface SegmentStore {
-
-    SegmentTracker getTracker();
-
-    /**
-     * Returns the head state.
-     *
-     * @return head state
-     */
-    @Nonnull
-    SegmentNodeState getHead();
-
-    boolean setHead(SegmentNodeState base, SegmentNodeState head);
 
     /**
      * Checks whether the identified segment exists in this store.
@@ -57,7 +41,7 @@ public interface SegmentStore {
      * @param segmentId segment identifier
      * @return identified segment, or a {@link SegmentNotFoundException} thrown if not found
      */
-    @CheckForNull
+    @Nonnull
     Segment readSegment(SegmentId segmentId);
 
     /**
@@ -70,25 +54,30 @@ public interface SegmentStore {
      */
     void writeSegment(SegmentId id, byte[] bytes, int offset, int length) throws IOException;
 
-    void close();
-
     /**
-     * Read a blob from external storage.
+     * Create a {@link SegmentId} represented by the given MSB/LSB pair.
      *
-     * @param reference blob reference
-     * @return external blob
+     * @param msb The most significant bits of the {@link SegmentId}.
+     * @param lsb The least significant bits of the {@link SegmentId}.
+     * @return A non-{@code null} instance of {@link SegmentId}.
      */
-    Blob readBlob(String reference);
+    @Nonnull
+    SegmentId newSegmentId(long msb, long lsb);
 
     /**
-     * Returns the external BlobStore (if configured) with this store
+     * Create a new {@link SegmentId} for a segment of type "bulk".
+     *
+     * @return A non-{@code null} instance of {@link SegmentId}.
      */
-    @CheckForNull
-    BlobStore getBlobStore();
+    @Nonnull
+    SegmentId newBulkSegmentId();
 
     /**
-     * Triggers removal of segments that are no longer referenceable.
+     * Create a new {@link SegmentId} for a segment of type "data".
+     *
+     * @return A non-{@code null} instance of {@link SegmentId}.
      */
-    void gc();
+    @Nonnull
+    SegmentId newDataSegmentId();
 
 }

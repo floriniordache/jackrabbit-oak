@@ -45,10 +45,12 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 
 import org.apache.jackrabbit.oak.api.Blob;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.PropertyState;
+import org.apache.jackrabbit.oak.plugins.blob.BlobStoreBlob;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 import org.apache.jackrabbit.oak.spi.commit.ChangeDispatcher;
 import org.apache.jackrabbit.oak.spi.commit.CommitHook;
@@ -71,24 +73,62 @@ import org.slf4j.LoggerFactory;
 public class SegmentNodeStore implements NodeStore, Observable {
 
     public static class SegmentNodeStoreBuilder {
-        private final SegmentStore store;
+        private static final Logger LOG = LoggerFactory.getLogger(SegmentNodeStoreBuilder.class);
+
+        @Nonnull
+        private final Revisions revisions;
+
+        @Nonnull
+        private final SegmentReader reader;
+
+        @Nonnull
+        private final SegmentWriter writer;
+
+        @CheckForNull
+        private final BlobStore blobStore;
+
         private boolean isCreated;
 
-        private SegmentNodeStoreBuilder(@Nonnull SegmentStore store) {
-            this.store = store;
+        private SegmentNodeStoreBuilder(
+                @Nonnull Revisions revisions,
+                @Nonnull SegmentReader reader,
+                @Nonnull SegmentWriter writer,
+                @Nullable BlobStore blobStore) {
+            this.revisions = revisions;
+            this.reader = reader;
+            this.writer = writer;
+            this.blobStore = blobStore;
         }
 
         @Nonnull
         public SegmentNodeStore build() {
             checkState(!isCreated);
             isCreated = true;
+            LOG.info("Creating segment node store {}", this);
             return new SegmentNodeStore(this);
+        }
+
+        @Nonnull
+        private static String getString(@CheckForNull BlobStore blobStore) {
+            return "blobStore=" + (blobStore == null ? "inline" : blobStore);
+        }
+
+        @Override
+        public String toString() {
+            return "SegmentNodeStoreBuilder{" +
+                    getString(blobStore) +
+                    '}';
         }
     }
 
     @Nonnull
-    public static SegmentNodeStoreBuilder builder(@Nonnull SegmentStore store) {
-        return new SegmentNodeStoreBuilder(checkNotNull(store));
+    public static SegmentNodeStoreBuilder builder(
+            @Nonnull Revisions revisions,
+            @Nonnull SegmentReader reader,
+            @Nonnull SegmentWriter writer,
+            @Nullable BlobStore blobStore) {
+        return new SegmentNodeStoreBuilder(checkNotNull(revisions),
+                checkNotNull(reader), checkNotNull(writer), blobStore);
     }
 
     private static final Logger log = LoggerFactory.getLogger(SegmentNodeStore.class);
@@ -97,7 +137,17 @@ public class SegmentNodeStore implements NodeStore, Observable {
 
     public static final String CHECKPOINTS = "checkpoints";
 
-    private final SegmentStore store;
+    @Nonnull
+    private final SegmentReader reader;
+
+    @Nonnull
+    private final SegmentWriter writer;
+
+    @Nonnull
+    private final Revisions revisions;
+
+    @CheckForNull
+    private final BlobStore blobStore;
 
     private final ChangeDispatcher changeDispatcher;
 
@@ -133,8 +183,11 @@ public class SegmentNodeStore implements NodeStore, Observable {
             log.info("initializing SegmentNodeStore with the commitFairLock option enabled.");
         }
         this.commitSemaphore = new Semaphore(1, COMMIT_FAIR_LOCK);
-        this.store = builder.store;
-        this.head = new AtomicReference<SegmentNodeState>(store.getHead());
+        this.revisions = builder.revisions;
+        this.reader = builder.reader;
+        this.writer = builder.writer;
+        this.blobStore = builder.blobStore;
+        this.head = new AtomicReference<SegmentNodeState>(reader.readHeadState(revisions));
         this.changeDispatcher = new ChangeDispatcher(getRoot());
     }
 
@@ -194,7 +247,7 @@ public class SegmentNodeStore implements NodeStore, Observable {
      * permit from the {@link #commitSemaphore}.
      */
     private void refreshHead() {
-        SegmentNodeState state = store.getHead();
+        SegmentNodeState state = reader.readHeadState(revisions);
         if (!state.getRecordId().equals(head.get().getRecordId())) {
             head.set(state);
             changeDispatcher.contentChanged(state.getChildNode(ROOT), null);
@@ -216,18 +269,6 @@ public class SegmentNodeStore implements NodeStore, Observable {
             }
         }
         return head.get().getChildNode(ROOT);
-    }
-
-    @Nonnull
-    public NodeState getSuperRoot() {
-        if (commitSemaphore.tryAcquire()) {
-            try {
-                refreshHead();
-            } finally {
-                commitSemaphore.release();
-            }
-        }
-        return head.get();
     }
 
     @Override
@@ -291,7 +332,7 @@ public class SegmentNodeStore implements NodeStore, Observable {
 
     @Override
     public Blob createBlob(InputStream stream) throws IOException {
-        return store.getTracker().getWriter().writeStream(stream);
+        return writer.writeStream(stream);
     }
 
     @Override
@@ -300,11 +341,10 @@ public class SegmentNodeStore implements NodeStore, Observable {
         //a blob reference refers to the secure reference obtained from Blob#getReference()
         //However in SegmentStore terminology a blob is referred via 'external reference'
         //That 'external reference' would map to blobId obtained from BlobStore#getBlobId
-        BlobStore blobStore = store.getBlobStore();
         if (blobStore != null) {
             String blobId = blobStore.getBlobId(reference);
             if (blobId != null) {
-                return store.readBlob(blobId);
+                return new BlobStoreBlob(blobStore, blobId);
             }
             return null;
         }
@@ -366,7 +406,11 @@ public class SegmentNodeStore implements NodeStore, Observable {
             }
 
             NodeBuilder cp = checkpoints.child(name);
-            cp.setProperty("timestamp", now + lifetime);
+            if (Long.MAX_VALUE - now > lifetime) {
+                cp.setProperty("timestamp", now + lifetime);
+            } else {
+                cp.setProperty("timestamp", Long.MAX_VALUE);
+            }
             cp.setProperty("created", now);
 
             NodeBuilder props = cp.setChildNode("properties");
@@ -376,7 +420,7 @@ public class SegmentNodeStore implements NodeStore, Observable {
             cp.setChildNode(ROOT, state.getChildNode(ROOT));
 
             SegmentNodeState newState = builder.getNodeState();
-            if (store.setHead(state, newState)) {
+            if (revisions.setHead(state.getRecordId(), newState.getRecordId())) {
                 refreshHead();
                 return true;
             } else {
@@ -438,7 +482,7 @@ public class SegmentNodeStore implements NodeStore, Observable {
                     if (cp.exists()) {
                         cp.remove();
                         SegmentNodeState newState = builder.getNodeState();
-                        if (store.setHead(state, newState)) {
+                        if (revisions.setHead(state.getRecordId(), newState.getRecordId())) {
                             refreshHead();
                             return true;
                         }
@@ -479,7 +523,7 @@ public class SegmentNodeStore implements NodeStore, Observable {
 
         private boolean setHead(SegmentNodeState before, SegmentNodeState after) {
             refreshHead();
-            if (store.setHead(before, after)) {
+            if (revisions.setHead(before.getRecordId(), after.getRecordId())) {
                 head.set(after);
                 changeDispatcher.contentChanged(after.getChildNode(ROOT), info);
                 refreshHead();

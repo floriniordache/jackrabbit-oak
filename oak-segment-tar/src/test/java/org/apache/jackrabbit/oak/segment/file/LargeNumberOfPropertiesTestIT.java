@@ -19,12 +19,14 @@
 
 package org.apache.jackrabbit.oak.segment.file;
 
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 import static org.junit.Assume.assumeTrue;
 
 import java.io.File;
 import java.io.IOException;
 
 import org.apache.jackrabbit.oak.segment.SegmentNodeStore;
+import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
@@ -54,7 +56,7 @@ public class LargeNumberOfPropertiesTestIT {
             .getBoolean(LargeNumberOfPropertiesTestIT.class.getSimpleName());
 
     @Rule
-    public TemporaryFolder folder = new TemporaryFolder();
+    public TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
     private File getFileStoreFolder() {
         return folder.getRoot();
@@ -67,9 +69,9 @@ public class LargeNumberOfPropertiesTestIT {
 
     @Test
     public void corruption() throws Exception {
-        FileStore fileStore = FileStore.builder(getFileStoreFolder()).withMaxFileSize(5)
+        FileStore fileStore = fileStoreBuilder(getFileStoreFolder()).withMaxFileSize(5)
                 .withNoCache().withMemoryMapping(true).build();
-        SegmentNodeStore nodeStore = SegmentNodeStore.builder(fileStore).build();
+        SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
 
         NodeBuilder root = nodeStore.getRoot().builder();
 

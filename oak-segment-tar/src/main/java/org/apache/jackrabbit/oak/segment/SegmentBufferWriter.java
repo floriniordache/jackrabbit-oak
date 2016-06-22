@@ -29,12 +29,13 @@ import static com.google.common.collect.Sets.newHashSet;
 import static java.lang.System.arraycopy;
 import static java.lang.System.currentTimeMillis;
 import static java.lang.System.identityHashCode;
-import static org.apache.jackrabbit.oak.segment.Segment.GC_GEN_OFFSET;
+import static org.apache.jackrabbit.oak.segment.Segment.GC_GENERATION_OFFSET;
 import static org.apache.jackrabbit.oak.segment.Segment.MAX_SEGMENT_SIZE;
 import static org.apache.jackrabbit.oak.segment.Segment.RECORD_ID_BYTES;
 import static org.apache.jackrabbit.oak.segment.Segment.SEGMENT_REFERENCE_LIMIT;
 import static org.apache.jackrabbit.oak.segment.Segment.align;
 import static org.apache.jackrabbit.oak.segment.SegmentId.isDataSegmentId;
+import static org.apache.jackrabbit.oak.segment.SegmentVersion.LATEST_VERSION;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -43,6 +44,9 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+
+import javax.annotation.CheckForNull;
+import javax.annotation.Nonnull;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -61,6 +65,9 @@ import org.slf4j.LoggerFactory;
  * </pre>
  * The behaviour of this class is undefined should the pre-allocated buffer be
  * overrun be calling any of the write methods.
+ * <p>
+ * Instances of this class are <em>not thread safe</em>. See also the class comment of
+ * {@link SegmentWriter}.
  */
 public class SegmentBufferWriter implements WriteOperationHandler {
     private static final Logger LOG = LoggerFactory.getLogger(SegmentBufferWriter.class);
@@ -76,19 +83,20 @@ public class SegmentBufferWriter implements WriteOperationHandler {
      */
     private final List<RecordId> blobrefs = newArrayList();
 
+    @Nonnull
     private final SegmentStore store;
 
-    /**
-     * Version of the segment storage format.
-     */
-    private final SegmentVersion version;
+    @Nonnull
+    private final SegmentTracker tracker;
+
+    @Nonnull
+    private final SegmentReader reader;
 
     /**
      * Id of this writer.
      */
+    @Nonnull
     private final String wid;
-
-    private final SegmentTracker tracker;
 
     private final int generation;
 
@@ -112,20 +120,20 @@ public class SegmentBufferWriter implements WriteOperationHandler {
      */
     private int position;
 
-    public SegmentBufferWriter(SegmentStore store, SegmentVersion version, String wid, int generation) {
-        this.store = store;
-        this.version = version;
+    public SegmentBufferWriter(@Nonnull SegmentStore store,
+                               @Nonnull SegmentTracker tracker,
+                               @Nonnull SegmentReader reader,
+                               @CheckForNull String wid,
+                               int generation) {
+        this.store = checkNotNull(store);
+        this.tracker = checkNotNull(tracker);
+        this.reader = checkNotNull(reader);
         this.wid = (wid == null
                 ? "w-" + identityHashCode(this)
                 : wid);
 
-        this.tracker = store.getTracker();
         this.generation = generation;
         newSegment();
-    }
-
-    public SegmentBufferWriter(SegmentStore store, SegmentVersion version, String wid) {
-        this(store, version, wid, store.getTracker().getGcGeneration());
     }
 
     @Override
@@ -154,14 +162,14 @@ public class SegmentBufferWriter implements WriteOperationHandler {
         buffer[0] = '0';
         buffer[1] = 'a';
         buffer[2] = 'K';
-        buffer[3] = SegmentVersion.asByte(version);
+        buffer[3] = SegmentVersion.asByte(LATEST_VERSION);
         buffer[4] = 0; // reserved
         buffer[5] = 0; // refcount
 
-        buffer[GC_GEN_OFFSET] = (byte) (generation >> 24);
-        buffer[GC_GEN_OFFSET + 1] = (byte) (generation >> 16);
-        buffer[GC_GEN_OFFSET + 2] = (byte) (generation >> 8);
-        buffer[GC_GEN_OFFSET + 3] = (byte) generation;
+        buffer[GC_GENERATION_OFFSET] = (byte) (generation >> 24);
+        buffer[GC_GENERATION_OFFSET + 1] = (byte) (generation >> 16);
+        buffer[GC_GENERATION_OFFSET + 2] = (byte) (generation >> 8);
+        buffer[GC_GENERATION_OFFSET + 3] = (byte) generation;
         length = 0;
         position = buffer.length;
         roots.clear();
@@ -169,10 +177,10 @@ public class SegmentBufferWriter implements WriteOperationHandler {
 
         String metaInfo =
             "{\"wid\":\"" + wid + '"' +
-            ",\"sno\":" + tracker.getNextSegmentNo() +
+            ",\"sno\":" + tracker.getSegmentCount() +
             ",\"t\":" + currentTimeMillis() + "}";
         try {
-            segment = new Segment(tracker, buffer, metaInfo);
+            segment = new Segment(store, reader, buffer, metaInfo);
             byte[] data = metaInfo.getBytes(UTF_8);
             RecordWriters.newValueWriter(data.length, data).write(this);
         } catch (IOException e) {
@@ -328,25 +336,8 @@ public class SegmentBufferWriter implements WriteOperationHandler {
             }
 
             SegmentId segmentId = segment.getSegmentId();
-            int segmentOffset = buffer.length - length;
-
             LOG.debug("Writing data segment {} ({} bytes)", segmentId, length);
-            store.writeSegment(segmentId, buffer, segmentOffset, length);
-
-            // Keep this segment in memory as it's likely to be accessed soon
-            ByteBuffer data;
-            if (segmentOffset > 4096) {
-                data = ByteBuffer.allocate(length);
-                data.put(buffer, segmentOffset, length);
-                data.rewind();
-            } else {
-                data = ByteBuffer.wrap(buffer, segmentOffset, length);
-            }
-
-            // It is important to put the segment into the cache only *after* it has been
-            // written to the store since as soon as it is in the cache it becomes eligible
-            // for eviction, which might lead to SNFEs when it is not yet in the store at that point.
-            tracker.setSegment(segmentId, new Segment(tracker, segmentId, data));
+            store.writeSegment(segmentId, buffer, buffer.length - length, length);
             newSegment();
         }
     }

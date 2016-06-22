@@ -19,6 +19,7 @@
 
 package org.apache.jackrabbit.oak.segment.file;
 
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 import static org.junit.Assert.assertTrue;
 
 import java.io.ByteArrayInputStream;
@@ -29,7 +30,7 @@ import java.util.Random;
 import com.google.common.base.Suppliers;
 import org.apache.jackrabbit.oak.api.Blob;
 import org.apache.jackrabbit.oak.segment.SegmentNodeStore;
-import org.apache.jackrabbit.oak.segment.file.FileStore;
+import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
@@ -41,7 +42,7 @@ import org.junit.rules.TemporaryFolder;
 public class CompactionEstimatorTest {
 
     @Rule
-    public TemporaryFolder folder = new TemporaryFolder();
+    public TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
     private File getFileStoreFolder() {
         return folder.getRoot();
@@ -52,8 +53,8 @@ public class CompactionEstimatorTest {
         final int MB = 1024 * 1024;
         final int blobSize = 2 * MB;
 
-        FileStore fileStore = FileStore.builder(getFileStoreFolder()).withMaxFileSize(2).withMemoryMapping(false).build();
-        SegmentNodeStore nodeStore = SegmentNodeStore.builder(fileStore).build();
+        FileStore fileStore = fileStoreBuilder(getFileStoreFolder()).withMaxFileSize(2).withMemoryMapping(false).build();
+        SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
 
         // 1. Create some blob properties
         NodeBuilder builder = nodeStore.getRoot().builder();

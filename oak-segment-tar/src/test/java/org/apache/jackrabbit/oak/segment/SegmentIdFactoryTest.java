@@ -29,42 +29,43 @@ import org.apache.jackrabbit.oak.segment.memory.MemoryStore;
 import org.junit.Test;
 
 public class SegmentIdFactoryTest {
-
-    private final SegmentTracker factory;
+    private final MemoryStore store;
+    private final SegmentTracker tracker;
 
     public SegmentIdFactoryTest() throws IOException {
-        factory = new MemoryStore().getTracker();
+        store = new MemoryStore();
+        tracker = store.getTracker();
     }
 
     @Test
     public void segmentIdType() {
-        assertTrue(factory.newDataSegmentId().isDataSegmentId());
-        assertTrue(factory.newBulkSegmentId().isBulkSegmentId());
+        assertTrue(store.newDataSegmentId().isDataSegmentId());
+        assertTrue(store.newBulkSegmentId().isBulkSegmentId());
 
-        assertFalse(factory.newDataSegmentId().isBulkSegmentId());
-        assertFalse(factory.newBulkSegmentId().isDataSegmentId());
+        assertFalse(store.newDataSegmentId().isBulkSegmentId());
+        assertFalse(store.newBulkSegmentId().isDataSegmentId());
     }
 
     @Test
     public void internedSegmentIds() {
-        assertTrue(factory.getSegmentId(0, 0) == factory.getSegmentId(0, 0));
-        assertTrue(factory.getSegmentId(1, 2) == factory.getSegmentId(1, 2));
-        assertTrue(factory.getSegmentId(1, 2) != factory.getSegmentId(3, 4));
+        assertTrue(store.newSegmentId(0, 0) == store.newSegmentId(0, 0));
+        assertTrue(store.newSegmentId(1, 2) == store.newSegmentId(1, 2));
+        assertTrue(store.newSegmentId(1, 2) != store.newSegmentId(3, 4));
     }
 
     @Test
     public void referencedSegmentIds() throws InterruptedException {
-        SegmentId a = factory.newDataSegmentId();
-        SegmentId b = factory.newBulkSegmentId();
-        SegmentId c = factory.newDataSegmentId();
+        SegmentId a = store.newDataSegmentId();
+        SegmentId b = store.newBulkSegmentId();
+        SegmentId c = store.newDataSegmentId();
 
-        Set<SegmentId> ids = factory.getReferencedSegmentIds();
+        Set<SegmentId> ids = tracker.getReferencedSegmentIds();
         assertTrue(ids.contains(a));
         assertTrue(ids.contains(b));
         assertTrue(ids.contains(c));
 
         // the returned set is a snapshot in time, not continuously updated
-        assertFalse(ids.contains(factory.newBulkSegmentId()));
+        assertFalse(ids.contains(store.newBulkSegmentId()));
     }
 
     /**
@@ -74,8 +75,8 @@ public class SegmentIdFactoryTest {
      */
     // @Test
     public void garbageCollection() {
-        SegmentId a = factory.newDataSegmentId();
-        SegmentId b = factory.newBulkSegmentId();
+        SegmentId a = store.newDataSegmentId();
+        SegmentId b = store.newBulkSegmentId();
 
         // generate lots of garbage copies of an UUID to get the
         // garbage collector to reclaim also the original instance
@@ -86,7 +87,7 @@ public class SegmentIdFactoryTest {
         System.gc();
 
         // now the original UUID should no longer be present
-        Set<SegmentId> ids = factory.getReferencedSegmentIds();
+        Set<SegmentId> ids = tracker.getReferencedSegmentIds();
         assertFalse(ids.contains(a));
         assertTrue(ids.contains(b));
     }
@@ -97,13 +98,13 @@ public class SegmentIdFactoryTest {
     @Test(expected = IllegalStateException.class)
     public void dataAIOOBE() throws IOException {
         MemoryStore store = new MemoryStore();
-        Segment segment = store.getHead().getSegment();
+        Segment segment = store.getRevisions().getHead().getSegment();
         byte[] buffer = new byte[segment.size()];
         segment.readBytes(Segment.MAX_SEGMENT_SIZE - segment.size(), buffer, 0, segment.size());
 
-        SegmentId id = factory.newDataSegmentId();
+        SegmentId id = store.newDataSegmentId();
         ByteBuffer data = ByteBuffer.wrap(buffer);
-        Segment s = new Segment(factory, id, data);
+        Segment s = new Segment(store, store.getReader(), id, data);
         s.getRefId(1);
     }
 
@@ -112,9 +113,9 @@ public class SegmentIdFactoryTest {
      */
     @Test(expected = IllegalStateException.class)
     public void bulkAIOOBE() {
-        SegmentId id = factory.newBulkSegmentId();
+        SegmentId id = store.newBulkSegmentId();
         ByteBuffer data = ByteBuffer.allocate(4);
-        Segment s = new Segment(factory, id, data);
+        Segment s = new Segment(store, store.getReader(), id, data);
         s.getRefId(1);
     }
 
