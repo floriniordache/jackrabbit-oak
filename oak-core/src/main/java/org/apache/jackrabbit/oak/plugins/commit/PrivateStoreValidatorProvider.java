@@ -17,8 +17,11 @@
 
 package org.apache.jackrabbit.oak.plugins.commit;
 
+import org.apache.felix.scr.annotations.*;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.Tree;
+import org.apache.jackrabbit.oak.commons.PropertiesUtil;
+import org.apache.jackrabbit.oak.plugins.document.Commit;
 import org.apache.jackrabbit.oak.plugins.tree.TreeFactory;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.DefaultValidator;
@@ -27,73 +30,106 @@ import org.apache.jackrabbit.oak.spi.commit.ValidatorProvider;
 import org.apache.jackrabbit.oak.spi.mount.Mount;
 import org.apache.jackrabbit.oak.spi.mount.MountInfoProvider;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
+import org.osgi.framework.BundleContext;
+import org.osgi.framework.ServiceRegistration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nonnull;
+import java.util.Map;
 
 /**
  * {@link Validator} which detects change commits to the read only mounts.
  */
+@Component(label = "Apache Jackrabbit Oak PrivateStoreValidatorProvider")
 public class PrivateStoreValidatorProvider extends ValidatorProvider {
 
-    private MountInfoProvider mountInfoProvider;
-    private boolean failOnReadonlyMountCommit;
+    private final Logger logger = LoggerFactory.getLogger(getClass());
+    private static final String ROOT_PATH = "/";
 
-    /**
-     * Use a {@link MountInfoProvider} to determine the system's read only mounts
-     *
-     * @param mountInfoProvider - the {@link MountInfoProvider}
-     * @param failOnReadonlyMountCommit - fail when detecting a commit on a read only mount
-     *  or just log the commit information and let the commit go through
-     */
-    public PrivateStoreValidatorProvider(MountInfoProvider mountInfoProvider, boolean failOnReadonlyMountCommit) {
-        this.mountInfoProvider = mountInfoProvider;
-        this.failOnReadonlyMountCommit = failOnReadonlyMountCommit;
-    }
+    @Reference
+    private MountInfoProvider mountInfoProvider;
+
+    @Property(
+        boolValue = false,
+        label = "Fail when detecting commits to the read-only stores",
+        description = "Commits will fail if set to true when detecting changes to any read-only store. If set to false the commit information is only logged."
+    )
+    public static final String PROP_FAIL_ON_DETECTION = "failOnDetection";
+    private boolean failOnDetection;
+
+    private ServiceRegistration serviceRegistration;
 
     @Nonnull
     public Validator getRootValidator(NodeState before, NodeState after, CommitInfo info) {
-        return new PrivateStoreValidator();
+        return new PrivateStoreValidator(ROOT_PATH);
+    }
+
+    @Activate
+    private void activate(BundleContext bundleContext, Map<String, ?> config) {
+        failOnDetection = PropertiesUtil.toBoolean(config.get(PROP_FAIL_ON_DETECTION), false);
+
+        if (mountInfoProvider.getNonDefaultMounts().size() > 1) {
+            logger.debug("Detected multiple non-default mounts, registering PrivateStoreValidatorProvider commit validator.");
+            serviceRegistration = bundleContext.registerService(PrivateStoreValidatorProvider.class.getName(), this, null);
+        } else {
+            logger.debug("No custom mounts detected.");
+        }
+
+    }
+
+    @Deactivate
+    private void deactivate() {
+        if (serviceRegistration != null) {
+            serviceRegistration.unregister();
+            serviceRegistration = null;
+        }
     }
 
     private class PrivateStoreValidator extends DefaultValidator {
         private final Logger logger = LoggerFactory.getLogger(getClass());
 
-        public PrivateStoreValidator() {
+        private String path;
+
+        public PrivateStoreValidator(String path) {
+            this.path = path;
         }
 
         public Validator childNodeAdded(String name, NodeState after) throws CommitFailedException {
-            return logReadOnlyMountCommit(name, after);
+            return checkPrivateStoreCommit(getCommitPath(name));
         }
 
         public Validator childNodeChanged(String name, NodeState before, NodeState after) throws CommitFailedException {
-            return logReadOnlyMountCommit(name, after);
+            return checkPrivateStoreCommit(getCommitPath(name));
         }
 
         public Validator childNodeDeleted(String name, NodeState before) throws CommitFailedException {
-            return logReadOnlyMountCommit(name, before);
+            return checkPrivateStoreCommit(getCommitPath(name));
         }
 
-        private Validator logReadOnlyMountCommit(String nodeName, NodeState nodeState) throws CommitFailedException {
-            Tree nodeStateTree = TreeFactory.createReadOnlyTree(nodeState);
-            String nodePath = nodeStateTree.getPath();
-            String changeNodePath = nodeStateTree.isRoot()
-                    ? nodePath + nodeName
-                    : nodePath + "/" + nodeName;
-
-            Mount mountInfo = mountInfoProvider.getMountByPath(changeNodePath);
+        private Validator checkPrivateStoreCommit(String commitPath) throws CommitFailedException {
+            Mount mountInfo = mountInfoProvider.getMountByPath(commitPath);
             if (mountInfo.isReadOnly()) {
-                Throwable throwable = new Throwable("Commit path: " + changeNodePath);
+                Throwable throwable = new Throwable("Commit path: " + commitPath);
                 logger.error("Detected commit to a read-only store! ", throwable);
 
-                if (failOnReadonlyMountCommit) {
+                if (failOnDetection) {
                     throw new CommitFailedException(CommitFailedException.UNSUPPORTED, 0,
                             "Unsupported commit to a read-only store!", throwable);
                 }
             }
 
-            return null;
+            return new PrivateStoreValidator(commitPath);
+        }
+
+        private String getCommitPath(String changeNodeName) {
+            String parentNodePath = path;
+
+            String commitPath = ROOT_PATH.equals(parentNodePath)
+                    ? parentNodePath + changeNodeName
+                    : parentNodePath + "/" + changeNodeName;
+
+            return commitPath;
         }
     }
 }

@@ -17,7 +17,9 @@
 
 package org.apache.jackrabbit.oak.plugins.commit;
 
+import org.apache.felix.scr.annotations.*;
 import org.apache.jackrabbit.oak.api.*;
+import org.apache.jackrabbit.oak.commons.PropertiesUtil;
 import org.apache.jackrabbit.oak.plugins.identifier.IdentifierManager;
 import org.apache.jackrabbit.oak.plugins.index.nodetype.NodeTypeIndexProvider;
 import org.apache.jackrabbit.oak.plugins.index.property.PropertyIndexProvider;
@@ -30,33 +32,36 @@ import org.apache.jackrabbit.oak.spi.mount.Mount;
 import org.apache.jackrabbit.oak.spi.mount.MountInfoProvider;
 import org.apache.jackrabbit.oak.spi.query.CompositeQueryIndexProvider;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
+import org.osgi.framework.BundleContext;
+import org.osgi.framework.ServiceRegistration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nonnull;
+import java.util.Map;
 
 /**
  * {@link Validator} which detects commits containing references across shared and private repositories
  */
 
+@Component(label = "Apache Jackrabbit Oak CrossStoreReferencesValidatorProvider")
 public class CrossStoreReferencesValidatorProvider extends ValidatorProvider {
 
+    private final Logger logger = LoggerFactory.getLogger(getClass());
     private static final String ROOT_PATH = "/";
 
+    @Reference
     private MountInfoProvider mountInfoProvider;
+
+    @Property(
+        boolValue = false,
+        label = "Fail when detecting cross store references",
+        description = "Commits will fail if set to true when cross store property references are detected. If set to false the commit information is only logged."
+    )
+    public static final String PROP_FAIL_ON_DETECTION = "failOnDetection";
     private boolean failOnDetection;
 
-    /**
-     * Use a {@link MountInfoProvider} to determine the system's read only mounts
-     *
-     * @param mountInfoProvider - the {@link MountInfoProvider}
-     * @param failOnDetection - fail when detecting references across repositories
-     *  or just log the commit information and let the commit go through
-     */
-    public CrossStoreReferencesValidatorProvider(MountInfoProvider mountInfoProvider, boolean failOnDetection) {
-        this.mountInfoProvider = mountInfoProvider;
-        this.failOnDetection = failOnDetection;
-    }
+    private ServiceRegistration serviceRegistration;
 
     @Nonnull
     public Validator getRootValidator(NodeState before, NodeState after, CommitInfo info) {
@@ -68,6 +73,26 @@ public class CrossStoreReferencesValidatorProvider extends ValidatorProvider {
         IdentifierManager identifierManager = new IdentifierManager(systemRoot);
 
         return new CrossStoreReferencesValidator(ROOT_PATH, identifierManager);
+    }
+
+    @Activate
+    private void activate(BundleContext bundleContext, Map<String, ?> config) {
+        failOnDetection = PropertiesUtil.toBoolean(config.get(PROP_FAIL_ON_DETECTION), false);
+
+        if (mountInfoProvider.getNonDefaultMounts().size() > 1) {
+            logger.debug("Detected multiple non-default mounts, registering CrossStoreReferencesValidatorProvider commit validator.");
+            serviceRegistration = bundleContext.registerService(CrossStoreReferencesValidatorProvider.class.getName(), this, null);
+        } else {
+            logger.debug("No custom mounts detected.");
+        }
+    }
+
+    @Deactivate
+    private void deactivate() {
+        if (serviceRegistration != null) {
+            serviceRegistration.unregister();
+            serviceRegistration = null;
+        }
     }
 
     private class CrossStoreReferencesValidator extends DefaultValidator {
