@@ -64,6 +64,7 @@ import javax.sql.DataSource;
 import com.google.common.base.Function;
 import com.google.common.base.Stopwatch;
 import org.apache.jackrabbit.oak.cache.CacheStats;
+import org.apache.jackrabbit.oak.cache.CacheValue;
 import org.apache.jackrabbit.oak.plugins.document.Collection;
 import org.apache.jackrabbit.oak.plugins.document.Document;
 import org.apache.jackrabbit.oak.plugins.document.DocumentMK;
@@ -492,16 +493,18 @@ public class RDBDocumentStore implements DocumentStore {
 
     @Override
     public CacheInvalidationStats invalidateCache() {
-        for (NodeDocument nd : nodesCache.values()) {
-            nd.markUpToDate(0);
+        for (CacheValue key : nodesCache.keys()) {
+            invalidateCache(Collection.NODES, key.toString());
         }
         return null;
     }
 
     @Override
     public CacheInvalidationStats invalidateCache(Iterable<String> keys) {
-        //TODO: optimize me
-        return invalidateCache();
+        for (String key : keys) {
+            invalidateCache(Collection.NODES, key);
+        }
+        return null;
     }
 
     @Override
@@ -521,6 +524,7 @@ public class RDBDocumentStore implements DocumentStore {
             if (remove) {
                 nodesCache.invalidate(id);
             } else {
+                nodesCache.markChanged(id);
                 NodeDocument entry = nodesCache.getIfPresent(id);
                 if (entry != null) {
                     entry.markUpToDate(0);
@@ -1420,8 +1424,17 @@ public class RDBDocumentStore implements DocumentStore {
                     // already in the cache
                     doc = convertFromDBObject(collection, row);
                 } else {
-                    // otherwise mark it as fresh
-                    ((NodeDocument) doc).markUpToDate(now);
+                    // we got a document from the cache, thus collection is NODES
+                    // and a tracker is present
+                    Lock lock = locks.acquire(row.getId());
+                    try {
+                        if (!tracker.mightBeenAffected(row.getId())) {
+                            // otherwise mark it as fresh
+                            ((NodeDocument) doc).markUpToDate(now);
+                        }
+                    } finally {
+                        lock.unlock();
+                    }
                 }
                 result.add(doc);
             }
