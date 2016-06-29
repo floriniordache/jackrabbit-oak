@@ -25,6 +25,7 @@ import org.apache.jackrabbit.oak.plugins.index.nodetype.NodeTypeIndexProvider;
 import org.apache.jackrabbit.oak.plugins.index.property.PropertyIndexProvider;
 import org.apache.jackrabbit.oak.plugins.index.reference.ReferenceIndexProvider;
 import org.apache.jackrabbit.oak.plugins.memory.MemoryNodeStore;
+import org.apache.jackrabbit.oak.plugins.multiplex.NonDefaultMountsValidatorProvider;
 import org.apache.jackrabbit.oak.plugins.tree.RootFactory;
 import org.apache.jackrabbit.oak.query.QueryEngineSettings;
 import org.apache.jackrabbit.oak.spi.commit.*;
@@ -45,13 +46,10 @@ import java.util.Map;
  */
 
 @Component(label = "Apache Jackrabbit Oak CrossStoreReferencesValidatorProvider")
-public class CrossStoreReferencesValidatorProvider extends ValidatorProvider {
+public class CrossStoreReferencesValidatorProvider extends NonDefaultMountsValidatorProvider {
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
     private static final String ROOT_PATH = "/";
-
-    @Reference
-    private MountInfoProvider mountInfoProvider;
 
     @Property(
         boolValue = false,
@@ -76,19 +74,25 @@ public class CrossStoreReferencesValidatorProvider extends ValidatorProvider {
     }
 
     @Activate
-    private void activate(BundleContext bundleContext, Map<String, ?> config) {
+    protected void activate(BundleContext bundleContext, Map<String, ?> config) {
         failOnDetection = PropertiesUtil.toBoolean(config.get(PROP_FAIL_ON_DETECTION), false);
-
-        if (mountInfoProvider.getNonDefaultMounts().size() > 1) {
-            logger.debug("Detected multiple non-default mounts, registering CrossStoreReferencesValidatorProvider commit validator.");
-            serviceRegistration = bundleContext.registerService(CrossStoreReferencesValidatorProvider.class.getName(), this, null);
-        } else {
-            logger.debug("No custom mounts detected.");
-        }
+        super.activate(bundleContext, config);
     }
 
     @Deactivate
     private void deactivate() {
+        unregisterValidatorProvider();
+    }
+
+    public void nonDefaultMountsDetected(BundleContext bundleContext) {
+        serviceRegistration = bundleContext.registerService(CrossStoreReferencesValidatorProvider.class.getName(), this, null);
+    }
+
+    public void defaultMountsDetected(BundleContext bundleContext) {
+        unregisterValidatorProvider();
+    }
+
+    private void unregisterValidatorProvider() {
         if (serviceRegistration != null) {
             serviceRegistration.unregister();
             serviceRegistration = null;
@@ -156,6 +160,7 @@ public class CrossStoreReferencesValidatorProvider extends ValidatorProvider {
                 return;
             }
 
+            MountInfoProvider mountInfoProvider = getMountInfoProvider();
             Mount targetMount = mountInfoProvider.getMountByPath(targetPath);
             Mount sourceMount = mountInfoProvider.getMountByPath(path);
 
