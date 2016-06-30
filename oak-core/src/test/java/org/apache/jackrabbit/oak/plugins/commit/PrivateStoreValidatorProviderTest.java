@@ -80,9 +80,11 @@ public class PrivateStoreValidatorProviderTest {
         Root r = s.getLatestRoot();
         Tree t = r.getTree("/").addChild("content");
         t.addChild("node1").setProperty("jcr:primaryType", "nt:base");
+
         Tree readonlyRoot = t.addChild("readonly");
         readonlyRoot.setProperty("jcr:primaryType", "nt:base");
         readonlyRoot.addChild("readonlyChild").setProperty("jcr:primaryType", "nt:base");
+
         r.commit();
 
         // register a different mount info provider
@@ -92,11 +94,13 @@ public class PrivateStoreValidatorProviderTest {
         // commits under /content/readonly should now fail
         s = repository.login(null, null);
 
+        // changes that are not under the read-only mount should work
         r = s.getLatestRoot();
         t = r.getTree("/").addChild("content");
         t.addChild("node2").setProperty("jcr:primaryType", "nt:base");
         r.commit();
 
+        // changes under the read-only mount should fail
         readonlyRoot = t.getChild("readonly");
         readonlyRoot.setProperty("testProp", "test");
         try {

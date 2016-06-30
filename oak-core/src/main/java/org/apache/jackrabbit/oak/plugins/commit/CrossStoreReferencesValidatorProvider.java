@@ -66,8 +66,8 @@ public class CrossStoreReferencesValidatorProvider extends NonDefaultMountsValid
         MemoryNodeStore store = new MemoryNodeStore(after);
         Root systemRoot = RootFactory.createSystemRoot(store, EmptyHook.INSTANCE, null,
                 null, new QueryEngineSettings(),
-                new CompositeQueryIndexProvider(new PropertyIndexProvider(),
-                        new NodeTypeIndexProvider(), new ReferenceIndexProvider()));
+                new CompositeQueryIndexProvider(new PropertyIndexProvider().with(getMountInfoProvider()),
+                        new NodeTypeIndexProvider(), new ReferenceIndexProvider().with(getMountInfoProvider())));
         IdentifierManager identifierManager = new IdentifierManager(systemRoot);
 
         return new CrossStoreReferencesValidator(ROOT_PATH, identifierManager);
@@ -85,7 +85,9 @@ public class CrossStoreReferencesValidatorProvider extends NonDefaultMountsValid
     }
 
     public void nonDefaultMountsDetected(BundleContext bundleContext) {
-        serviceRegistration = bundleContext.registerService(CrossStoreReferencesValidatorProvider.class.getName(), this, null);
+        if (serviceRegistration == null) {
+            serviceRegistration = bundleContext.registerService(CrossStoreReferencesValidatorProvider.class.getName(), this, null);
+        }
     }
 
     public void defaultMountsDetected(BundleContext bundleContext) {

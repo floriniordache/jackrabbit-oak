@@ -16,10 +16,7 @@
  */
 package org.apache.jackrabbit.oak.plugins.multiplex;
 
-import org.apache.felix.scr.annotations.Component;
-import org.apache.felix.scr.annotations.Reference;
-import org.apache.felix.scr.annotations.ReferencePolicy;
-import org.apache.felix.scr.annotations.ReferencePolicyOption;
+import org.apache.felix.scr.annotations.*;
 import org.apache.jackrabbit.oak.spi.commit.ValidatorProvider;
 import org.apache.jackrabbit.oak.spi.mount.MountInfoProvider;
 import org.osgi.framework.BundleContext;
@@ -37,7 +34,7 @@ import java.util.Map;
 public abstract class NonDefaultMountsValidatorProvider extends ValidatorProvider {
     private final Logger logger = LoggerFactory.getLogger(getClass());
 
-    @Reference(policy = ReferencePolicy.DYNAMIC, policyOption = ReferencePolicyOption.GREEDY)
+    @Reference(policy = ReferencePolicy.DYNAMIC, policyOption = ReferencePolicyOption.GREEDY, cardinality = ReferenceCardinality.OPTIONAL_UNARY)
     private volatile MountInfoProvider mountInfoProvider;
 
     protected void activate(BundleContext bundleContext, Map<String, ?> config) {
