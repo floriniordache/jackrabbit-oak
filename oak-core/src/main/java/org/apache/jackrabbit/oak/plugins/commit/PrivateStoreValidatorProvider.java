@@ -25,6 +25,7 @@ import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.DefaultValidator;
 import org.apache.jackrabbit.oak.spi.commit.Validator;
 import org.apache.jackrabbit.oak.spi.mount.Mount;
+import org.apache.jackrabbit.oak.spi.mount.MountInfoProvider;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.ServiceRegistration;
@@ -104,14 +105,17 @@ public class PrivateStoreValidatorProvider extends NonDefaultMountsValidatorProv
         }
 
         private Validator checkPrivateStoreCommit(String commitPath) throws CommitFailedException {
-            Mount mountInfo = getMountInfoProvider().getMountByPath(commitPath);
-            if (mountInfo.isReadOnly()) {
-                Throwable throwable = new Throwable("Commit path: " + commitPath);
-                logger.error("Detected commit to a read-only store! ", throwable);
+            MountInfoProvider mountInfoProvider = getMountInfoProvider();
+            if (mountInfoProvider != null) {
+                Mount mountInfo = mountInfoProvider.getMountByPath(commitPath);
+                if (mountInfo.isReadOnly()) {
+                    Throwable throwable = new Throwable("Commit path: " + commitPath);
+                    logger.error("Detected commit to a read-only store! ", throwable);
 
-                if (failOnDetection) {
-                    throw new CommitFailedException(CommitFailedException.UNSUPPORTED, 0,
-                            "Unsupported commit to a read-only store!", throwable);
+                    if (failOnDetection) {
+                        throw new CommitFailedException(CommitFailedException.UNSUPPORTED, 0,
+                                "Unsupported commit to a read-only store!", throwable);
+                    }
                 }
             }
 
