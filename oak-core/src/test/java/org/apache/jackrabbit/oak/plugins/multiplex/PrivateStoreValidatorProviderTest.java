@@ -1,4 +1,4 @@
-package org.apache.jackrabbit.oak.plugins.commit;
+package org.apache.jackrabbit.oak.plugins.multiplex;
 
 
 import org.apache.jackrabbit.oak.Oak;
@@ -6,6 +6,7 @@ import org.apache.jackrabbit.oak.api.ContentRepository;
 import org.apache.jackrabbit.oak.api.ContentSession;
 import org.apache.jackrabbit.oak.api.Root;
 import org.apache.jackrabbit.oak.api.Tree;
+import org.apache.jackrabbit.oak.plugins.multiplex.PrivateStoreValidatorProvider;
 import org.apache.jackrabbit.oak.plugins.multiplex.SimpleMountInfoProvider;
 import org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent;
 import org.apache.jackrabbit.oak.spi.commit.EditorProvider;

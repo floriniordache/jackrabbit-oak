@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package org.apache.jackrabbit.oak.plugins.commit;
+package org.apache.jackrabbit.oak.plugins.multiplex;
 
 import org.apache.felix.scr.annotations.*;
 import org.apache.jackrabbit.oak.api.*;

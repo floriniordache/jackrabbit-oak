@@ -1,8 +1,9 @@
-package org.apache.jackrabbit.oak.plugins.commit;
+package org.apache.jackrabbit.oak.plugins.multiplex;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.jackrabbit.oak.Oak;
 import org.apache.jackrabbit.oak.api.*;
+import org.apache.jackrabbit.oak.plugins.multiplex.CrossStoreReferencesValidatorProvider;
 import org.apache.jackrabbit.oak.plugins.multiplex.SimpleMountInfoProvider;
 import org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent;
 import org.apache.jackrabbit.oak.spi.commit.EditorProvider;
