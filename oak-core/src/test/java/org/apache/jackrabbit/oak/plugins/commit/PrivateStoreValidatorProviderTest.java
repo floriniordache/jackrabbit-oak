@@ -16,6 +16,7 @@ import org.junit.After;
 import org.junit.Assert;
 import org.junit.Rule;
 import org.junit.Test;
+import org.mockito.internal.util.reflection.Whitebox;
 import org.osgi.framework.ServiceReference;
 import org.osgi.framework.ServiceRegistration;
 
@@ -89,7 +90,6 @@ public class PrivateStoreValidatorProviderTest {
 
         // register a different mount info provider
         registerMountInfoProvider("/content/readonly");
-        MockOsgi.injectServices(privateStoreValidatorProvider, context.bundleContext());
 
         // commits under /content/readonly should now fail
         s = repository.login(null, null);
@@ -137,13 +137,12 @@ public class PrivateStoreValidatorProviderTest {
         Assert.assertNull("No PrivateStoreValidatorProvider should be registered for default mounts!", serviceRef);
     }
 
-    private void registerValidatorProvider(PrivateStoreValidatorProvider provider, boolean failOnDetection) {
-        MockOsgi.injectServices(provider, context.bundleContext());
-
+    private void registerValidatorProvider(PrivateStoreValidatorProvider validatorProvider, boolean failOnDetection) {
         Map<String, Object> propMap = new HashMap<>();
         propMap.put("failOnDetection", failOnDetection);
 
-        MockOsgi.activate(provider, context.bundleContext(), propMap);
+        MockOsgi.injectServices(validatorProvider, context.bundleContext());
+        MockOsgi.activate(validatorProvider, context.bundleContext(), propMap);
     }
 
     /**
@@ -159,11 +158,16 @@ public class PrivateStoreValidatorProviderTest {
             mipServiceRegistration = null;
         }
 
-        MountInfoProvider mip = MountInfoProvider.DEFAULT;
+        MountInfoProvider mountInfoProvider = MountInfoProvider.DEFAULT;
         if (readOnlyPaths != null && readOnlyPaths.length > 0) {
-            mip = SimpleMountInfoProvider.newBuilder().readOnlyMount("readOnly", readOnlyPaths).build();
+            mountInfoProvider = SimpleMountInfoProvider.newBuilder().readOnlyMount("readOnly", readOnlyPaths).build();
         }
 
-        mipServiceRegistration = context.bundleContext().registerService(MountInfoProvider.class.getName(), mip, null);
+        mipServiceRegistration = context.bundleContext().registerService(MountInfoProvider.class.getName(), mountInfoProvider, null);
+
+        if (privateStoreValidatorProvider != null) {
+            Whitebox.setInternalState(privateStoreValidatorProvider, "mountInfoProvider", mountInfoProvider);
+            registerValidatorProvider(privateStoreValidatorProvider, true);
+        }
     }
 }

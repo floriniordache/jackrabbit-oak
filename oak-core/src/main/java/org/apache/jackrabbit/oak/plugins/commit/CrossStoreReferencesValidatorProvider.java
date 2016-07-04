@@ -25,7 +25,6 @@ import org.apache.jackrabbit.oak.plugins.index.nodetype.NodeTypeIndexProvider;
 import org.apache.jackrabbit.oak.plugins.index.property.PropertyIndexProvider;
 import org.apache.jackrabbit.oak.plugins.index.reference.ReferenceIndexProvider;
 import org.apache.jackrabbit.oak.plugins.memory.MemoryNodeStore;
-import org.apache.jackrabbit.oak.plugins.multiplex.NonDefaultMountsValidatorProvider;
 import org.apache.jackrabbit.oak.plugins.tree.RootFactory;
 import org.apache.jackrabbit.oak.query.QueryEngineSettings;
 import org.apache.jackrabbit.oak.spi.commit.*;
@@ -46,7 +45,7 @@ import java.util.Map;
  */
 
 @Component(label = "Apache Jackrabbit Oak CrossStoreReferencesValidatorProvider")
-public class CrossStoreReferencesValidatorProvider extends NonDefaultMountsValidatorProvider {
+public class CrossStoreReferencesValidatorProvider extends ValidatorProvider {
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
     private static final String ROOT_PATH = "/";
@@ -59,6 +58,9 @@ public class CrossStoreReferencesValidatorProvider extends NonDefaultMountsValid
     public static final String PROP_FAIL_ON_DETECTION = "failOnDetection";
     private boolean failOnDetection;
 
+    @Reference
+    private MountInfoProvider mountInfoProvider;
+
     private ServiceRegistration serviceRegistration;
 
     @Nonnull
@@ -66,8 +68,8 @@ public class CrossStoreReferencesValidatorProvider extends NonDefaultMountsValid
         MemoryNodeStore store = new MemoryNodeStore(after);
         Root systemRoot = RootFactory.createSystemRoot(store, EmptyHook.INSTANCE, null,
                 null, new QueryEngineSettings(),
-                new CompositeQueryIndexProvider(new PropertyIndexProvider().with(getMountInfoProvider()),
-                        new NodeTypeIndexProvider(), new ReferenceIndexProvider().with(getMountInfoProvider())));
+                new CompositeQueryIndexProvider(new PropertyIndexProvider().with(mountInfoProvider),
+                        new NodeTypeIndexProvider(), new ReferenceIndexProvider().with(mountInfoProvider)));
         IdentifierManager identifierManager = new IdentifierManager(systemRoot);
 
         return new CrossStoreReferencesValidator(ROOT_PATH, identifierManager);
@@ -76,21 +78,19 @@ public class CrossStoreReferencesValidatorProvider extends NonDefaultMountsValid
     @Activate
     protected void activate(BundleContext bundleContext, Map<String, ?> config) {
         failOnDetection = PropertiesUtil.toBoolean(config.get(PROP_FAIL_ON_DETECTION), false);
-        super.activate(bundleContext, config);
+
+        if (mountInfoProvider != null
+                && mountInfoProvider.hasNonDefaultMounts()) {
+            if (serviceRegistration == null) {
+                serviceRegistration = bundleContext.registerService(CrossStoreReferencesValidatorProvider.class.getName(), this, null);
+            }
+        } else {
+            unregisterValidatorProvider();
+        }
     }
 
     @Deactivate
     private void deactivate() {
-        unregisterValidatorProvider();
-    }
-
-    public void nonDefaultMountsDetected(BundleContext bundleContext) {
-        if (serviceRegistration == null) {
-            serviceRegistration = bundleContext.registerService(CrossStoreReferencesValidatorProvider.class.getName(), this, null);
-        }
-    }
-
-    public void defaultMountsDetected(BundleContext bundleContext) {
         unregisterValidatorProvider();
     }
 
@@ -162,7 +162,6 @@ public class CrossStoreReferencesValidatorProvider extends NonDefaultMountsValid
                 return;
             }
 
-            MountInfoProvider mountInfoProvider = getMountInfoProvider();
             Mount targetMount = mountInfoProvider.getMountByPath(targetPath);
             Mount sourceMount = mountInfoProvider.getMountByPath(path);
 

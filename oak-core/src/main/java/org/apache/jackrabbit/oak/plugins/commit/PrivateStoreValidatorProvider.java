@@ -20,10 +20,10 @@ package org.apache.jackrabbit.oak.plugins.commit;
 import org.apache.felix.scr.annotations.*;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.commons.PropertiesUtil;
-import org.apache.jackrabbit.oak.plugins.multiplex.NonDefaultMountsValidatorProvider;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.DefaultValidator;
 import org.apache.jackrabbit.oak.spi.commit.Validator;
+import org.apache.jackrabbit.oak.spi.commit.ValidatorProvider;
 import org.apache.jackrabbit.oak.spi.mount.Mount;
 import org.apache.jackrabbit.oak.spi.mount.MountInfoProvider;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
@@ -39,7 +39,7 @@ import java.util.Map;
  * {@link Validator} which detects change commits to the read only mounts.
  */
 @Component(label = "Apache Jackrabbit Oak PrivateStoreValidatorProvider")
-public class PrivateStoreValidatorProvider extends NonDefaultMountsValidatorProvider {
+public class PrivateStoreValidatorProvider extends ValidatorProvider {
     private static final String ROOT_PATH = "/";
 
     @Property(
@@ -50,6 +50,9 @@ public class PrivateStoreValidatorProvider extends NonDefaultMountsValidatorProv
     public static final String PROP_FAIL_ON_DETECTION = "failOnDetection";
     private boolean failOnDetection;
 
+    @Reference
+    private MountInfoProvider mountInfoProvider;
+
     private ServiceRegistration serviceRegistration;
 
     @Nonnull
@@ -58,21 +61,22 @@ public class PrivateStoreValidatorProvider extends NonDefaultMountsValidatorProv
     }
 
     @Activate
+    @Modified
     protected void activate(BundleContext bundleContext, Map<String, ?> config) {
-        super.activate(bundleContext, config);
         failOnDetection = PropertiesUtil.toBoolean(config.get(PROP_FAIL_ON_DETECTION), false);
+
+        if (mountInfoProvider != null
+                && mountInfoProvider.hasNonDefaultMounts()) {
+            if (serviceRegistration == null) {
+                serviceRegistration = bundleContext.registerService(PrivateStoreValidatorProvider.class.getName(), this, null);
+            }
+        } else {
+            unregisterValidatorProvider();
+        }
     }
 
     @Deactivate
     private void deactivate() {
-        unregisterValidatorProvider();
-    }
-
-    public void nonDefaultMountsDetected(BundleContext bundleContext) {
-        serviceRegistration = bundleContext.registerService(PrivateStoreValidatorProvider.class.getName(), this, null);
-    }
-
-    public void defaultMountsDetected(BundleContext bundleContext) {
         unregisterValidatorProvider();
     }
 
@@ -105,7 +109,6 @@ public class PrivateStoreValidatorProvider extends NonDefaultMountsValidatorProv
         }
 
         private Validator checkPrivateStoreCommit(String commitPath) throws CommitFailedException {
-            MountInfoProvider mountInfoProvider = getMountInfoProvider();
             if (mountInfoProvider != null) {
                 Mount mountInfo = mountInfoProvider.getMountByPath(commitPath);
                 if (mountInfo.isReadOnly()) {

@@ -10,6 +10,7 @@ import org.apache.jackrabbit.oak.spi.security.OpenSecurityProvider;
 import org.apache.sling.testing.mock.osgi.MockOsgi;
 import org.apache.sling.testing.mock.osgi.junit.OsgiContext;
 import org.junit.*;
+import org.mockito.internal.util.reflection.Whitebox;
 import org.osgi.framework.ServiceReference;
 import org.osgi.framework.ServiceRegistration;
 
@@ -164,5 +165,10 @@ public class CrossStoreReferencesValidatorProviderTest {
         }
 
         mipServiceRegistration = context.bundleContext().registerService(MountInfoProvider.class.getName(), mip, null);
+        if (crossStoreReferencesValidatorProvider != null) {
+            Whitebox.setInternalState(crossStoreReferencesValidatorProvider, "mountInfoProvider", mip);
+            registerValidatorProvider(crossStoreReferencesValidatorProvider, true);
+        }
+
     }
 }
