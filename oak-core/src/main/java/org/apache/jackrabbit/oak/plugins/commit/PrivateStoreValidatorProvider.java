@@ -19,11 +19,9 @@ package org.apache.jackrabbit.oak.plugins.commit;
 
 import org.apache.felix.scr.annotations.*;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
+import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.commons.PropertiesUtil;
-import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
-import org.apache.jackrabbit.oak.spi.commit.DefaultValidator;
-import org.apache.jackrabbit.oak.spi.commit.Validator;
-import org.apache.jackrabbit.oak.spi.commit.ValidatorProvider;
+import org.apache.jackrabbit.oak.spi.commit.*;
 import org.apache.jackrabbit.oak.spi.mount.Mount;
 import org.apache.jackrabbit.oak.spi.mount.MountInfoProvider;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
@@ -65,13 +63,9 @@ public class PrivateStoreValidatorProvider extends ValidatorProvider {
     protected void activate(BundleContext bundleContext, Map<String, ?> config) {
         failOnDetection = PropertiesUtil.toBoolean(config.get(PROP_FAIL_ON_DETECTION), false);
 
-        if (mountInfoProvider != null
-                && mountInfoProvider.hasNonDefaultMounts()) {
-            if (serviceRegistration == null) {
-                serviceRegistration = bundleContext.registerService(PrivateStoreValidatorProvider.class.getName(), this, null);
-            }
-        } else {
-            unregisterValidatorProvider();
+        if (mountInfoProvider.hasNonDefaultMounts()
+            && serviceRegistration == null) {
+            serviceRegistration = bundleContext.registerService(EditorProvider.class.getName(), this, null);
         }
     }
 
@@ -126,13 +120,7 @@ public class PrivateStoreValidatorProvider extends ValidatorProvider {
         }
 
         private String getCommitPath(String changeNodeName) {
-            String parentNodePath = path;
-
-            String commitPath = ROOT_PATH.equals(parentNodePath)
-                    ? parentNodePath + changeNodeName
-                    : parentNodePath + "/" + changeNodeName;
-
-            return commitPath;
+            return PathUtils.concat(path, changeNodeName);
         }
     }
 }

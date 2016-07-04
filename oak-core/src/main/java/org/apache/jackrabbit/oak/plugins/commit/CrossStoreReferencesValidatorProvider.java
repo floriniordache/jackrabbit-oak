@@ -19,6 +19,7 @@ package org.apache.jackrabbit.oak.plugins.commit;
 
 import org.apache.felix.scr.annotations.*;
 import org.apache.jackrabbit.oak.api.*;
+import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.commons.PropertiesUtil;
 import org.apache.jackrabbit.oak.plugins.identifier.IdentifierManager;
 import org.apache.jackrabbit.oak.plugins.index.nodetype.NodeTypeIndexProvider;
@@ -79,13 +80,9 @@ public class CrossStoreReferencesValidatorProvider extends ValidatorProvider {
     protected void activate(BundleContext bundleContext, Map<String, ?> config) {
         failOnDetection = PropertiesUtil.toBoolean(config.get(PROP_FAIL_ON_DETECTION), false);
 
-        if (mountInfoProvider != null
-                && mountInfoProvider.hasNonDefaultMounts()) {
-            if (serviceRegistration == null) {
-                serviceRegistration = bundleContext.registerService(CrossStoreReferencesValidatorProvider.class.getName(), this, null);
-            }
-        } else {
-            unregisterValidatorProvider();
+        if (mountInfoProvider.hasNonDefaultMounts()
+            && serviceRegistration == null) {
+            serviceRegistration = bundleContext.registerService(EditorProvider.class.getName(), this, null);
         }
     }
 
@@ -187,12 +184,7 @@ public class CrossStoreReferencesValidatorProvider extends ValidatorProvider {
          * @return - the {@link String} path of the given node
          */
         private String getNodePath(String nodeName) {
-            String parentNodePath = path;
-            String nodePath = ROOT_PATH.equals(parentNodePath)
-                    ? parentNodePath + nodeName
-                    : parentNodePath + "/" + nodeName;
-
-            return nodePath;
+            return PathUtils.concat(path, nodeName);
         }
 
         /**

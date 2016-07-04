@@ -5,6 +5,7 @@ import org.apache.jackrabbit.oak.Oak;
 import org.apache.jackrabbit.oak.api.*;
 import org.apache.jackrabbit.oak.plugins.multiplex.SimpleMountInfoProvider;
 import org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent;
+import org.apache.jackrabbit.oak.spi.commit.EditorProvider;
 import org.apache.jackrabbit.oak.spi.mount.MountInfoProvider;
 import org.apache.jackrabbit.oak.spi.security.OpenSecurityProvider;
 import org.apache.sling.testing.mock.osgi.MockOsgi;
@@ -81,8 +82,8 @@ public class CrossStoreReferencesValidatorProviderTest {
     @Test
     public void testValidatorServiceRegistered() throws Exception {
         // test service registration, there should be a service for the CrossStoreReferencesValidatorProvider
-        ServiceReference serviceRef = context.bundleContext().getServiceReference(CrossStoreReferencesValidatorProvider.class.getName());
-        Assert.assertNotNull("No PrivateStoreValidatorProvider available!", serviceRef);
+        Object validator = getValidatorService(CrossStoreReferencesValidatorProvider.class);
+        Assert.assertNotNull("No PrivateStoreValidatorProvider available!", validator);
     }
 
     @Test
@@ -90,8 +91,8 @@ public class CrossStoreReferencesValidatorProviderTest {
         // test service registration, for default mount there should be no service for the validator provider
         registerMountInfoProvider();
 
-        ServiceReference serviceRef = context.bundleContext().getServiceReference(CrossStoreReferencesValidatorProvider.class.getName());
-        Assert.assertNull("No PrivateStoreValidatorProvider should be registered for default mounts!", serviceRef);
+        Object validator = getValidatorService(CrossStoreReferencesValidatorProvider.class);
+        Assert.assertNull("No PrivateStoreValidatorProvider should be registered for default mounts!", validator);
     }
 
     @Test
@@ -137,6 +138,21 @@ public class CrossStoreReferencesValidatorProviderTest {
         }
     }
 
+    private Object getValidatorService(Class tClass) {
+        try {
+            ServiceReference[] services = context.bundleContext().getServiceReferences(EditorProvider.class.getName(), null);
+            for (ServiceReference serviceRef : services) {
+                Object service = context.bundleContext().getService(serviceRef);
+
+                if (service.getClass() == tClass) {
+                    return service;
+                }
+            }
+        } catch (Exception e) {}
+
+        return null;
+    }
+
     private void registerValidatorProvider(CrossStoreReferencesValidatorProvider provider, boolean failOnDetection) {
         MockOsgi.injectServices(provider, context.bundleContext());
 
@@ -166,6 +182,7 @@ public class CrossStoreReferencesValidatorProviderTest {
 
         mipServiceRegistration = context.bundleContext().registerService(MountInfoProvider.class.getName(), mip, null);
         if (crossStoreReferencesValidatorProvider != null) {
+            MockOsgi.deactivate(crossStoreReferencesValidatorProvider);
             Whitebox.setInternalState(crossStoreReferencesValidatorProvider, "mountInfoProvider", mip);
             registerValidatorProvider(crossStoreReferencesValidatorProvider, true);
         }

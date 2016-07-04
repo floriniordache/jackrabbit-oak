@@ -8,6 +8,7 @@ import org.apache.jackrabbit.oak.api.Root;
 import org.apache.jackrabbit.oak.api.Tree;
 import org.apache.jackrabbit.oak.plugins.multiplex.SimpleMountInfoProvider;
 import org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent;
+import org.apache.jackrabbit.oak.spi.commit.EditorProvider;
 import org.apache.jackrabbit.oak.spi.mount.MountInfoProvider;
 import org.apache.jackrabbit.oak.spi.security.OpenSecurityProvider;
 import org.apache.sling.testing.mock.osgi.MockOsgi;
@@ -124,8 +125,8 @@ public class PrivateStoreValidatorProviderTest {
         // test service registration, there should be a service for the PrivateStoreValidatorProvider
         setUp("/content/readonly");
 
-        ServiceReference serviceRef = context.bundleContext().getServiceReference(PrivateStoreValidatorProvider.class.getName());
-        Assert.assertNotNull("No PrivateStoreValidatorProvider available!", serviceRef);
+        Object validator = getValidatorService(PrivateStoreValidatorProvider.class);
+        Assert.assertNotNull("No PrivateStoreValidatorProvider available!", validator);
     }
 
     @Test
@@ -133,8 +134,23 @@ public class PrivateStoreValidatorProviderTest {
         // test service registration, for default mount there should be no service for the validator provider
         setUp();
 
-        ServiceReference serviceRef = context.bundleContext().getServiceReference(PrivateStoreValidatorProvider.class.getName());
-        Assert.assertNull("No PrivateStoreValidatorProvider should be registered for default mounts!", serviceRef);
+        Object validator = getValidatorService(PrivateStoreValidatorProvider.class);
+        Assert.assertNull("No PrivateStoreValidatorProvider should be registered for default mounts!", validator);
+    }
+
+    private Object getValidatorService(Class tClass) {
+        try {
+            ServiceReference[] services = context.bundleContext().getServiceReferences(EditorProvider.class.getName(), null);
+            for (ServiceReference serviceRef : services) {
+                Object service = context.bundleContext().getService(serviceRef);
+
+                if (service.getClass() == tClass) {
+                    return service;
+                }
+            }
+        } catch (Exception e) {}
+
+        return null;
     }
 
     private void registerValidatorProvider(PrivateStoreValidatorProvider validatorProvider, boolean failOnDetection) {
