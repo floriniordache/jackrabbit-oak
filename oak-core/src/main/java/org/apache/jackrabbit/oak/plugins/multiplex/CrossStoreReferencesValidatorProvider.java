@@ -52,7 +52,7 @@ public class CrossStoreReferencesValidatorProvider extends ValidatorProvider {
     private static final String ROOT_PATH = "/";
 
     @Property(
-        boolValue = false,
+        boolValue = true,
         label = "Fail when detecting cross store references",
         description = "Commits will fail if set to true when cross store property references are detected. If set to false the commit information is only logged."
     )
@@ -78,7 +78,7 @@ public class CrossStoreReferencesValidatorProvider extends ValidatorProvider {
 
     @Activate
     protected void activate(BundleContext bundleContext, Map<String, ?> config) {
-        failOnDetection = PropertiesUtil.toBoolean(config.get(PROP_FAIL_ON_DETECTION), false);
+        failOnDetection = PropertiesUtil.toBoolean(config.get(PROP_FAIL_ON_DETECTION), true);
 
         if (mountInfoProvider.hasNonDefaultMounts()
             && serviceRegistration == null) {
